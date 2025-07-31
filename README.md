@@ -29,11 +29,16 @@ pip install -r requirements.txt
 
 ### 2. Configure Environment
 
-Copy `.env.example` to `.env` and fill in your credentials:
+Copy `.env.template` to `.env` and fill in your credentials:
 
 ```bash
-cp .env.example .env
+cp .env.template .env
 ```
+
+**⚠️ SECURITY WARNING**: 
+- Never commit `.env` files with real API keys to version control
+- The `.env.production` file is included for reference only - rotate these keys after testing
+- Always use environment variables or secure secret management in production
 
 Required configurations:
 - **GHL_API_KEY**: Your GoHighLevel API key
