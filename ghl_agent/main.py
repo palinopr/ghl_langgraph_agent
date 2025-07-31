@@ -4,9 +4,9 @@ from fastapi.responses import JSONResponse
 import structlog
 import json
 
-from .config import settings, validate_config
-from .webhooks.handlers import WebhookHandler, WebhookValidator
-from .agent.graph import process_ghl_message
+from ghl_agent.config import settings, validate_config
+from ghl_agent.webhooks.handlers import WebhookHandler, WebhookValidator
+from ghl_agent.agent.graph import process_ghl_message
 
 # Configure structured logging
 structlog.configure(
@@ -138,7 +138,7 @@ async def handle_ghl_webhook(request: Request):
 @app.post("/test/conversation")
 async def test_conversation(request: Request):
     """Test endpoint for conversation processing"""
-    from .models import LeadInfo
+    from ghl_agent.models import LeadInfo
     
     try:
         data = await request.json()

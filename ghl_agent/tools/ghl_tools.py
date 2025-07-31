@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from ..config import settings
+from ghl_agent.config import settings
 
 logger = structlog.get_logger()
 

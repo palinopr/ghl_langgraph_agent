@@ -5,9 +5,9 @@ from typing import Dict, Any, Optional
 from fastapi import HTTPException, Request
 import structlog
 
-from ..config import settings
-from ..models import GHLWebhookPayload, MetaLeadWebhook, LeadInfo
-from ..agent.graph import process_ghl_message
+from ghl_agent.config import settings
+from ghl_agent.models import GHLWebhookPayload, MetaLeadWebhook, LeadInfo
+from ghl_agent.agent.graph import process_ghl_message
 
 logger = structlog.get_logger()
 

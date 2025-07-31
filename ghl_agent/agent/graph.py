@@ -6,7 +6,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langchain_openai import ChatOpenAI
 import os
 
-from ..tools.ghl_tools import (
+from ghl_agent.tools.ghl_tools import (
     send_ghl_message,
     get_ghl_contact_info,
     update_ghl_contact,
