@@ -1,8 +1,8 @@
 {
   "python_version": "3.11",
-  "dependencies": ["./requirements.txt"],
+  "dependencies": ["./"],
   "graphs": {
-    "ghl_agent": "./src/agent/graph.py:graph"
+    "ghl_agent": "./ghl_agent/agent/graph.py:graph"
   },
   "env": {
     "OPENAI_API_KEY": {

@@ -1,0 +1,29 @@
+[project]
+name = "ghl-langgraph-agent"
+version = "1.0.0"
+description = "AI agent for GHL and Meta integration"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "langgraph>=0.1.0",
+    "langchain>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langchain-anthropic>=0.1.0",
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=23.1.0",
+    "tenacity>=8.2.0",
+    "python-multipart>=0.0.6"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ghl_agent*"]
+exclude = ["tests*"]
