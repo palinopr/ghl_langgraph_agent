@@ -1,5 +1,5 @@
 """Battery calculation and consultation tools"""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from langchain_core.tools import tool
 import structlog
 
