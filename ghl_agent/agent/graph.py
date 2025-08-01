@@ -60,8 +60,7 @@ model = ChatOpenAI(
 
 # Tools - Use MCP when available, fallback to direct API
 # Check if we should use MCP tools
-# Disabled for now until MCP protocol is properly implemented
-use_mcp = os.getenv("GHL_USE_MCP", "false").lower() == "true"
+use_mcp = os.getenv("GHL_USE_MCP", "true").lower() == "true"
 
 if use_mcp:
     # Prefer MCP tools
@@ -94,8 +93,8 @@ model_with_tools = model.bind_tools(tools)
 SYSTEM_PROMPT = """Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
-REGLA CRÍTICA: SIEMPRE debes usar la función send_ghl_message para enviar TODAS tus respuestas al cliente. 
-No escribas respuestas directamente - SIEMPRE usa la herramienta send_ghl_message.
+REGLA CRÍTICA: SIEMPRE debes usar la función send_mcp_message para enviar TODAS tus respuestas al cliente. 
+No escribas respuestas directamente - SIEMPRE usa la herramienta send_mcp_message.
 
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento

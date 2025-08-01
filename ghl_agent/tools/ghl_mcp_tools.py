@@ -1,5 +1,6 @@
 """GoHighLevel MCP (Model Context Protocol) tools for LangGraph"""
 import httpx
+import json
 from typing import Dict, List, Optional, Any
 from langchain_core.tools import tool
 import structlog
@@ -33,9 +34,15 @@ class GHLMCPClient:
         is_deployment = bool(os.getenv("LANGGRAPH_AUTH_TYPE"))
         timeout_seconds = float(os.getenv("GHL_TIMEOUT_SECONDS", "60" if is_deployment else "30"))
         
+        # MCP uses JSON-RPC format
         payload = {
-            "tool": tool_name,
-            "input": input_data
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": input_data
+            },
+            "id": 1
         }
         
         logger.info(f"Calling MCP tool: {tool_name}", input_preview=str(input_data)[:100])
@@ -48,11 +55,44 @@ class GHLMCPClient:
             )
             
             # Log the response for debugging
-            if response.status_code >= 400:
-                logger.warning(f"MCP API error: {response.status_code} - {response.text[:200]}")
+            logger.debug(f"MCP Response: {response.status_code} - Headers: {dict(response.headers)}")
             
-            response.raise_for_status()
-            return response.json()
+            if response.status_code >= 400:
+                logger.warning(f"MCP API error: {response.status_code} - {response.text[:500]}")
+                response.raise_for_status()
+            
+            # MCP returns Server-Sent Events format
+            response_text = response.text
+            
+            # Parse SSE response
+            if response_text.startswith("event:"):
+                lines = response_text.strip().split('\n')
+                for line in lines:
+                    if line.startswith("data: "):
+                        data_json = line[6:]  # Remove "data: " prefix
+                        parsed = json.loads(data_json)
+                        
+                        # Check for errors
+                        if "error" in parsed:
+                            error = parsed["error"]
+                            raise Exception(f"MCP Error: {error.get('message', 'Unknown error')}")
+                        
+                        # Extract result
+                        if "result" in parsed:
+                            result = parsed["result"]
+                            # Parse nested JSON if needed
+                            if isinstance(result, dict) and "content" in result:
+                                content = result["content"]
+                                if isinstance(content, list) and content:
+                                    text_content = content[0].get("text", "")
+                                    try:
+                                        return json.loads(text_content)
+                                    except:
+                                        return {"raw_response": text_content}
+                            return result
+            
+            # Fallback to raw response
+            return {"raw_response": response_text}
 
 
 # Initialize MCP client
@@ -65,28 +105,43 @@ async def send_mcp_message(contact_id: str, message: str, conversation_id: Optio
     try:
         logger.info(f"Attempting to send WhatsApp message via MCP to contact: {contact_id}")
         
-        # MCP expects different parameter names
-        input_data = {
-            "conversationId": conversation_id,  # MCP might need conversation ID
-            "type": "WhatsApp",
-            "message": message
-        }
-        
-        # If we don't have conversation_id, we might need to search for it first
+        # First, we need to get or create a conversation
         if not conversation_id:
-            # Try to find existing conversation
+            # Search for existing conversation with this contact
             try:
                 search_result = await mcp_client.call_tool(
                     "conversations_search-conversation",
-                    {"contactId": contact_id, "limit": 1}
+                    {
+                        "query": contact_id,  # Try searching by contact ID
+                        "limit": 1
+                    }
                 )
                 
-                if search_result.get("conversations"):
-                    conversation_id = search_result["conversations"][0]["id"]
-                    input_data["conversationId"] = conversation_id
+                conversations = search_result.get("conversations", [])
+                if conversations:
+                    conversation_id = conversations[0].get("id")
                     logger.info(f"Found existing conversation: {conversation_id}")
+                else:
+                    # No conversation found, we might need to create one
+                    # For now, we'll try sending without conversation_id
+                    logger.warning("No conversation found for contact")
             except Exception as e:
                 logger.warning(f"Could not search for conversation: {e}")
+        
+        # According to MCP docs, send message needs conversationId
+        if conversation_id:
+            input_data = {
+                "conversationId": conversation_id,
+                "message": message,
+                "type": "WhatsApp"
+            }
+        else:
+            # Try with contactId instead
+            input_data = {
+                "contactId": contact_id,
+                "message": message,
+                "type": "WhatsApp"
+            }
         
         # Send the message
         result = await mcp_client.call_tool(
