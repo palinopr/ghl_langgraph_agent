@@ -53,8 +53,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan
 app = FastAPI(
     title="Battery Consultation Webhooks",
-    description="Webhook endpoints for GHL integration",
-    version="2.0.0",
+    description="Webhook endpoints for GHL integration with MCP",
+    version="2.1.0",
     lifespan=lifespan
 )
 
