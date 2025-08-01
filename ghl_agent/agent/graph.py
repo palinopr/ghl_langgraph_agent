@@ -1,10 +1,14 @@
 """LangGraph Cloud deployment graph"""
-from typing import TypedDict, Annotated, Sequence, Dict, Any, List
+from typing import TypedDict, Annotated, Sequence, Dict, Any, List, Optional, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 import os
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 from ghl_agent.tools.ghl_tools import (
     send_ghl_message,
@@ -14,11 +18,26 @@ from ghl_agent.tools.ghl_tools import (
     book_ghl_appointment
 )
 
+from ghl_agent.tools.battery_tools import (
+    calculate_battery_runtime,
+    recommend_battery_system,
+    format_consultation_request
+)
+
 # State definition
 class State(TypedDict):
     messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
     contact_id: str
     conversation_id: str | None
+    # Battery consultation specific state
+    housing_type: Optional[Literal["casa", "apartamento"]]
+    equipment_list: Optional[List[str]]
+    total_consumption: Optional[float]
+    battery_recommendation: Optional[str]
+    interested_in_consultation: Optional[bool]
+    customer_name: Optional[str]
+    customer_phone: Optional[str]
+    customer_email: Optional[str]
 
 
 # Initialize the model
@@ -33,23 +52,41 @@ tools = [
     get_ghl_contact_info,
     update_ghl_contact,
     get_available_calendar_slots,
-    book_ghl_appointment
+    book_ghl_appointment,
+    calculate_battery_runtime,
+    recommend_battery_system,
+    format_consultation_request
 ]
 
 # Bind tools to model
 model_with_tools = model.bind_tools(tools)
 
 # System prompt
-SYSTEM_PROMPT = """You are a customer service AI agent for a web development agency.
-Your job is to qualify leads and schedule appointments.
+SYSTEM_PROMPT = """Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
+Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
-Conversation flow:
-1. Greet warmly and ask about their project needs
-2. Ask about their budget (minimum $5,000 to qualify)
-3. If qualified, offer to schedule a consultation
-4. If not qualified, politely explain and offer resources
+FLUJO DE CONVERSACIÓN:
+1. Saluda cordialmente y pregunta si viven en casa o apartamento
+2. Pregunta qué equipos desean energizar por 6-8 horas
+3. Para apartamentos: Recomienda batería portátil (recarga por LUMA)
+4. Para casas: Menciona opciones con placas solares, LUMA o planta eléctrica
+5. Calcula el consumo usando estos valores estándar:
+   - Nevera: 300W
+   - TV: 70W
+   - Abanico: 60W
+   - Celulares: 15W
+   - Bombilla LED: 10W
+   - Freezer: 300W
+6. Explica la fórmula: Horas = Capacidad batería (Wh) / Consumo total (W)
+7. Da un ejemplo: Batería 5120Wh / 445W = ~11.5 horas
+8. Pregunta si desean orientación personalizada o ver el catálogo
 
-Keep responses short and conversational (1-2 sentences max)."""
+IMPORTANTE:
+- Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)
+- Usa un tono amigable y profesional
+- Si quieren orientación, recolecta: nombre, teléfono y email
+- Si no quieren orientación, ofrece el enlace: tuplantapr.com
+- Siempre enfócate en resolver necesidades de energía durante apagones"""
 
 
 def agent(state: State) -> Dict[str, Any]:
@@ -106,15 +143,29 @@ graph = workflow.compile()
 
 
 # Helper function for webhook integration
-async def process_ghl_message(contact_id: str, conversation_id: str, message: str) -> str:
+async def process_ghl_message(contact_id: str, conversation_id: str, message: str, 
+                            existing_state: Optional[Dict[str, Any]] = None) -> str:
     """Process a message from GHL webhook"""
     try:
-        # Initialize state
-        initial_state = {
-            "messages": [HumanMessage(content=message)],
-            "contact_id": contact_id,
-            "conversation_id": conversation_id
-        }
+        # Initialize or update state
+        if existing_state:
+            # Preserve conversation state
+            initial_state = existing_state.copy()
+            initial_state["messages"] = list(existing_state.get("messages", [])) + [HumanMessage(content=message)]
+        else:
+            initial_state = {
+                "messages": [HumanMessage(content=message)],
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "housing_type": None,
+                "equipment_list": None,
+                "total_consumption": None,
+                "battery_recommendation": None,
+                "interested_in_consultation": None,
+                "customer_name": None,
+                "customer_phone": None,
+                "customer_email": None
+            }
         
         # Run the graph
         result = await graph.ainvoke(initial_state)
@@ -126,10 +177,10 @@ async def process_ghl_message(contact_id: str, conversation_id: str, message: st
                     continue  # Skip tool call messages
                 return msg.content
         
-        return "I'm here to help! Could you tell me more about your project?"
+        return "¡Hola! Estoy aquí para ayudarte a encontrar la solución de batería perfecta. ¿Vives en casa o apartamento?"
         
     except Exception as e:
         print(f"Error processing message: {e}")
         import traceback
         traceback.print_exc()
-        return "I apologize, but I'm having trouble processing your request. Please try again."
+        return "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente."

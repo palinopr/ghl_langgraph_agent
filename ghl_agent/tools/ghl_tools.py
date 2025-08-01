@@ -82,10 +82,14 @@ class GHLClient:
     
     async def get_calendar_slots(self, calendar_id: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
         """Get available calendar slots"""
+        # Convert date strings to timestamps
+        from datetime import datetime as dt
+        start_timestamp = int(dt.fromisoformat(start_date).timestamp() * 1000)
+        end_timestamp = int(dt.fromisoformat(end_date).timestamp() * 1000)
+        
         params = {
-            "calendarId": calendar_id,
-            "startDate": start_date,
-            "endDate": end_date,
+            "startDate": start_timestamp,
+            "endDate": end_timestamp,
             "timezone": "UTC"
         }
         

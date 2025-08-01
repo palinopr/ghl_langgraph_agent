@@ -45,4 +45,4 @@ langgraph_api_key.txt
 # Local data
 data/
 *.db
-*.sqlite
+*.sqlite.langgraph_api/

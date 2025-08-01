@@ -21,13 +21,11 @@ class LeadInfo(BaseModel):
 
 class GHLWebhookPayload(BaseModel):
     """GoHighLevel webhook payload structure"""
-    type: str
-    location_id: str
-    contact_id: str
-    conversation_id: Optional[str] = None
-    message: Optional[str] = None
-    attachments: Optional[List[Dict[str, Any]]] = None
-    metadata: Optional[Dict[str, Any]] = None
+    id: str  # contact.id
+    name: Optional[str] = None  # contact.name
+    email: Optional[str] = None  # contact.email
+    phone: Optional[str] = None  # contact.phone
+    message: str  # message.body
 
 
 class MetaLeadWebhook(BaseModel):

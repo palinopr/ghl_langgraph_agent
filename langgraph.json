@@ -4,38 +4,13 @@
   "graphs": {
     "ghl_agent": "./ghl_agent/agent/graph.py:graph"
   },
-  "env": {
-    "OPENAI_API_KEY": {
-      "description": "OpenAI API key for GPT-4",
-      "required": true
-    },
-    "GHL_API_KEY": {
-      "description": "GoHighLevel API key",
-      "required": true
-    },
-    "GHL_LOCATION_ID": {
-      "description": "GoHighLevel location ID",
-      "required": true
-    },
-    "GHL_CALENDAR_ID": {
-      "description": "GoHighLevel calendar ID",
-      "required": true
-    },
-    "GHL_API_BASE_URL": {
-      "description": "GoHighLevel API base URL",
-      "default": "https://services.leadconnectorhq.com"
-    },
-    "META_VERIFY_TOKEN": {
-      "description": "Meta webhook verification token",
-      "required": false
-    },
-    "META_APP_SECRET": {
-      "description": "Meta app secret for webhook signature",
-      "required": false
-    },
-    "TIMEZONE": {
-      "description": "Timezone for appointments",
-      "default": "America/New_York"
+  "env": ".env",
+  "http": {
+    "app": "./ghl_agent/custom_app.py:app",
+    "cors": {
+      "allow_origins": ["*"],
+      "allow_methods": ["GET", "POST"],
+      "allow_headers": ["*"]
     }
   }
 }

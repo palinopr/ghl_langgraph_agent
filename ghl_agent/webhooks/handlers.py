@@ -78,16 +78,25 @@ class WebhookHandler:
             
             # Process message through agent
             response = await process_ghl_message(
-                contact_id=webhook_data.contact_id,
-                conversation_id=webhook_data.conversation_id,
+                contact_id=webhook_data.id,  # Using id as contact_id
+                conversation_id=None,  # No conversation_id in new format
                 message=webhook_data.message
             )
+            
+            # Store contact info if provided
+            contact_info = {}
+            if webhook_data.name:
+                contact_info["name"] = webhook_data.name
+            if webhook_data.email:
+                contact_info["email"] = webhook_data.email
+            if webhook_data.phone:
+                contact_info["phone"] = webhook_data.phone
             
             return {
                 "success": True,
                 "response": response,
-                "contact_id": webhook_data.contact_id,
-                "conversation_id": webhook_data.conversation_id
+                "contact_id": webhook_data.id,
+                "contact_info": contact_info
             }
             
         except Exception as e:
@@ -101,20 +110,18 @@ class WebhookValidator:
     @staticmethod
     def validate_ghl_webhook(data: Dict[str, Any]) -> GHLWebhookPayload:
         """Validate and parse GHL webhook data"""
-        required_fields = ["type", "locationId", "contactId"]
+        required_fields = ["id", "message"]
         
         for field in required_fields:
             if field not in data:
                 raise ValueError(f"Missing required field: {field}")
         
         return GHLWebhookPayload(
-            type=data["type"],
-            location_id=data["locationId"],
-            contact_id=data["contactId"],
-            conversation_id=data.get("conversationId"),
-            message=data.get("message", {}).get("body"),
-            attachments=data.get("message", {}).get("attachments", []),
-            metadata=data.get("metadata", {})
+            id=data["id"],
+            name=data.get("name"),
+            email=data.get("email"),
+            phone=data.get("phone"),
+            message=data["message"]
         )
     
     @staticmethod
