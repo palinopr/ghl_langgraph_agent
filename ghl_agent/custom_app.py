@@ -1,6 +1,7 @@
 """Custom webhook app for LangGraph deployment"""
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 import json
 import structlog
 import os
@@ -9,34 +10,29 @@ from typing import Dict, Any
 # Configure logging
 logger = structlog.get_logger()
 
-# Create FastAPI app
-app = FastAPI(
-    title="Battery Consultation Webhooks",
-    description="Webhook endpoints for GHL integration",
-    version="2.0.0"
-)
-
 # Check if we're in deployment or local mode
 IS_DEPLOYMENT = os.getenv("LANGGRAPH_API_URL") is not None
+
+# Global client variable
+client = None
 
 # Import based on environment
 if IS_DEPLOYMENT:
     try:
         from langgraph_sdk import get_client
-        client = None
     except ImportError:
         logger.warning("LangGraph SDK not available in deployment")
-        client = None
 else:
     # For local testing, use the agent directly
     from ghl_agent.agent.graph import process_ghl_message
     client = "local"
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize based on environment"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage app lifecycle"""
     global client
     
+    # Startup
     if IS_DEPLOYMENT and client is None:
         try:
             from langgraph_sdk import get_client
@@ -48,6 +44,19 @@ async def startup_event():
             client = None
     else:
         logger.info("Running in local mode - using direct agent invocation")
+    
+    yield
+    
+    # Shutdown (if needed)
+    logger.info("Shutting down webhook app")
+
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title="Battery Consultation Webhooks",
+    description="Webhook endpoints for GHL integration",
+    version="2.0.0",
+    lifespan=lifespan
+)
 
 @app.post("/webhook/ghl")
 async def handle_ghl_webhook(request: Request):
