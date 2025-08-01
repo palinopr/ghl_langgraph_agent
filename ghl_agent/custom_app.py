@@ -66,18 +66,32 @@ async def handle_ghl_webhook(request: Request):
         
         # Log the webhook receipt
         logger.info("GHL webhook received", 
-                   contact_id=data.get("id"),
+                   type=data.get("type"),
+                   contact_id=data.get("contactId"),
                    has_message=bool(data.get("message")))
         
+        # Handle GHL webhook format
+        contact_id = data.get("contactId")
+        conversation_id = data.get("conversationId")
+        message_body = None
+        
+        # Extract message based on webhook type
+        if data.get("type") == "InboundMessage" and data.get("message"):
+            message_body = data["message"].get("body")
+        elif data.get("type") == "Test":
+            # Test webhook
+            return {"success": True, "message": "Test webhook received"}
+        
         # Basic validation
-        if not data.get("id") or not data.get("message"):
+        if not contact_id or not message_body:
+            logger.warning(f"Missing required fields: contact_id={contact_id}, message_body={message_body}")
             return {"success": False, "error": "Missing required fields"}
         
         # Process based on environment
         if IS_DEPLOYMENT and client and client != "local":
             # Deployment mode - use SDK
             try:
-                thread_id = f"ghl-{data['id']}"
+                thread_id = f"ghl-{contact_id}"
                 
                 # Try to get existing thread
                 try:
@@ -88,10 +102,9 @@ async def handle_ghl_webhook(request: Request):
                     thread = await client.threads.create(
                         thread_id=thread_id,
                         metadata={
-                            "contact_id": data["id"],
-                            "contact_name": data.get("name"),
-                            "contact_email": data.get("email"),
-                            "contact_phone": data.get("phone")
+                            "contact_id": contact_id,
+                            "conversation_id": conversation_id,
+                            "location_id": data.get("locationId")
                         }
                     )
                     logger.info(f"Created new thread: {thread_id}")
@@ -101,12 +114,9 @@ async def handle_ghl_webhook(request: Request):
                     thread_id=thread_id,
                     assistant_id="ghl_agent",  # This must match the name in langgraph.json
                     input={
-                        "messages": [{"role": "human", "content": data["message"]}],
-                        "contact_id": data["id"],
-                        "conversation_id": None,
-                        "customer_name": data.get("name"),
-                        "customer_phone": data.get("phone"),
-                        "customer_email": data.get("email")
+                        "messages": [{"role": "human", "content": message_body}],
+                        "contact_id": contact_id,
+                        "conversation_id": conversation_id
                     }
                 )
                 
@@ -115,7 +125,7 @@ async def handle_ghl_webhook(request: Request):
                 return JSONResponse(content={
                     "success": True,
                     "message": "Agent invoked successfully",
-                    "contact_id": data["id"],
+                    "contact_id": contact_id,
                     "thread_id": thread_id,
                     "run_id": run["run_id"],
                     "mode": "deployment"
@@ -132,9 +142,9 @@ async def handle_ghl_webhook(request: Request):
             # Local mode - use direct invocation
             try:
                 response = await process_ghl_message(
-                    contact_id=data["id"],
-                    conversation_id=None,
-                    message=data["message"]
+                    contact_id=contact_id,
+                    conversation_id=conversation_id,
+                    message=message_body
                 )
                 
                 logger.info(f"Agent response: {response[:100]}...")
@@ -142,7 +152,7 @@ async def handle_ghl_webhook(request: Request):
                 return JSONResponse(content={
                     "success": True,
                     "message": "Agent processed locally",
-                    "contact_id": data["id"],
+                    "contact_id": contact_id,
                     "response": response,
                     "mode": "local"
                 }, status_code=200)
