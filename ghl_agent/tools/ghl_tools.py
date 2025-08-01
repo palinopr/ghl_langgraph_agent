@@ -5,6 +5,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
+import os
 
 from ghl_agent.config import settings
 
@@ -23,10 +24,17 @@ class GHLClient:
         }
         self.location_id = settings.ghl_location_id
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(
+        stop=stop_after_attempt(int(os.getenv("GHL_RETRY_ATTEMPTS", "3"))),
+        wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make HTTP request to GHL API with retry logic"""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Use longer timeout in deployment environment
+        is_deployment = bool(os.getenv("LANGGRAPH_AUTH_TYPE"))
+        timeout_seconds = float(os.getenv("GHL_TIMEOUT_SECONDS", "60" if is_deployment else "30"))
+        
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.request(
                 method=method,
                 url=f"{self.base_url}{endpoint}",
@@ -154,6 +162,22 @@ async def send_ghl_message(contact_id: str, message: str, conversation_id: Optio
         message_id = result.get('messageId', result.get('id', 'unknown'))
         logger.info(f"WhatsApp message sent successfully. ID: {message_id}")
         return f"Message sent successfully. Message ID: {message_id}"
+    except RetryError as e:
+        # In deployment, network issues might be more common
+        logger.error(f"All retry attempts failed for contact {contact_id}")
+        
+        # Try to extract the actual error from the last attempt
+        last_error_msg = "Unknown error"
+        if hasattr(e, 'last_attempt') and e.last_attempt:
+            last_exception = e.last_attempt.exception()
+            if isinstance(last_exception, httpx.HTTPStatusError):
+                last_error_msg = f"HTTP {last_exception.response.status_code}"
+                logger.error(f"Last HTTP error: {last_exception.response.status_code} - {last_exception.response.text[:200]}")
+            else:
+                last_error_msg = str(last_exception)
+        
+        # Return a user-friendly error message
+        return f"Unable to send message due to connection issues. Please try again. (Error: {last_error_msg})"
     except httpx.HTTPStatusError as e:
         logger.error(f"HTTP Error sending WhatsApp: {e.response.status_code}", 
                     contact_id=contact_id,
