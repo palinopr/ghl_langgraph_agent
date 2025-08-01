@@ -65,6 +65,9 @@ model_with_tools = model.bind_tools(tools)
 SYSTEM_PROMPT = """Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
+REGLA CRÍTICA: SIEMPRE debes usar la función send_ghl_message para enviar TODAS tus respuestas al cliente. 
+No respondas directamente - usa la herramienta send_ghl_message.
+
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento
 2. Pregunta qué equipos desean energizar por 6-8 horas
@@ -82,6 +85,7 @@ FLUJO DE CONVERSACIÓN:
 8. Pregunta si desean orientación personalizada o ver el catálogo
 
 IMPORTANTE:
+- SIEMPRE usa send_ghl_message para enviar mensajes
 - Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)
 - Usa un tono amigable y profesional
 - Si quieren orientación, recolecta: nombre, teléfono y email
@@ -94,7 +98,9 @@ def agent(state: State) -> Dict[str, Any]:
     # Add system message if it's the first message
     messages = list(state["messages"])
     if not any(isinstance(m, SystemMessage) for m in messages):
-        messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
+        # Include contact_id in the system prompt
+        system_content = SYSTEM_PROMPT + f"\n\nCONTEXTO IMPORTANTE:\n- Contact ID del cliente: {state['contact_id']}\n- Usa este contact_id cuando llames a send_ghl_message"
+        messages.insert(0, SystemMessage(content=system_content))
     
     # Get response from model
     response = model_with_tools.invoke(messages)
