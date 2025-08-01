@@ -18,6 +18,9 @@ from ghl_agent.tools.ghl_tools import (
     book_ghl_appointment
 )
 
+import structlog
+logger = structlog.get_logger()
+
 from ghl_agent.tools.battery_tools import (
     calculate_battery_runtime,
     recommend_battery_system,
@@ -66,7 +69,7 @@ SYSTEM_PROMPT = """Eres un agente de servicio al cliente especializado en sistem
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
 REGLA CRÍTICA: SIEMPRE debes usar la función send_ghl_message para enviar TODAS tus respuestas al cliente. 
-No respondas directamente - usa la herramienta send_ghl_message.
+No escribas respuestas directamente - SIEMPRE usa la herramienta send_ghl_message.
 
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento
@@ -85,7 +88,8 @@ FLUJO DE CONVERSACIÓN:
 8. Pregunta si desean orientación personalizada o ver el catálogo
 
 IMPORTANTE:
-- SIEMPRE usa send_ghl_message para enviar mensajes
+- SIEMPRE usa send_ghl_message para enviar mensajes al cliente
+- El contact_id está disponible en el contexto
 - Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)
 - Usa un tono amigable y profesional
 - Si quieren orientación, recolecta: nombre, teléfono y email
@@ -149,44 +153,76 @@ graph = workflow.compile()
 
 
 # Helper function for webhook integration
-async def process_ghl_message(contact_id: str, conversation_id: str, message: str, 
+async def process_ghl_message(contact_id: str, conversation_id: Optional[str], message: str, 
                             existing_state: Optional[Dict[str, Any]] = None) -> str:
     """Process a message from GHL webhook"""
     try:
-        # Initialize or update state
-        if existing_state:
-            # Preserve conversation state
-            initial_state = existing_state.copy()
-            initial_state["messages"] = list(existing_state.get("messages", [])) + [HumanMessage(content=message)]
+        # For now, use a simple approach without LangGraph to avoid the tool message error
+        # Create system prompt with contact ID
+        system_prompt = f"""Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
+Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
+
+REGLA CRÍTICA: SIEMPRE usa la función send_ghl_message para enviar tu respuesta.
+Contact ID: {contact_id}
+
+FLUJO DE CONVERSACIÓN:
+1. Saluda cordialmente y pregunta si viven en casa o apartamento
+2. Pregunta qué equipos desean energizar por 6-8 horas
+3. Para apartamentos: Recomienda batería portátil (recarga por LUMA)
+4. Para casas: Menciona opciones con placas solares, LUMA o planta eléctrica
+5. Calcula el consumo con valores estándar (Nevera:300W, TV:70W, Abanico:60W, etc.)
+6. Explica la fórmula: Horas = Capacidad batería (Wh) / Consumo total (W)
+7. Pregunta si desean orientación personalizada o ver el catálogo
+
+Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
+
+        # Create messages
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=message)
+        ]
+        
+        # Get response from model with tools
+        response = await model_with_tools.ainvoke(messages)
+        
+        # Execute tool calls if any
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                if tool_call['name'] == 'send_ghl_message':
+                    # Update args with conversation_id if provided
+                    args = tool_call['args'].copy()
+                    if conversation_id:
+                        args['conversation_id'] = conversation_id
+                    
+                    result = await send_ghl_message.ainvoke(args)
+                    logger.info(f"WhatsApp message sent: {result}")
+            
+            return "Message processed and sent via WhatsApp"
         else:
-            initial_state = {
-                "messages": [HumanMessage(content=message)],
-                "contact_id": contact_id,
-                "conversation_id": conversation_id,
-                "housing_type": None,
-                "equipment_list": None,
-                "total_consumption": None,
-                "battery_recommendation": None,
-                "interested_in_consultation": None,
-                "customer_name": None,
-                "customer_phone": None,
-                "customer_email": None
-            }
-        
-        # Run the graph
-        result = await graph.ainvoke(initial_state)
-        
-        # Extract the assistant's response
-        for msg in reversed(result["messages"]):
-            if isinstance(msg, AIMessage):
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    continue  # Skip tool call messages
-                return msg.content
-        
-        return "¡Hola! Estoy aquí para ayudarte a encontrar la solución de batería perfecta. ¿Vives en casa o apartamento?"
+            # If model didn't use tool, force send the response
+            if response.content:
+                await send_ghl_message.ainvoke({
+                    "contact_id": contact_id,
+                    "message": response.content,
+                    "conversation_id": conversation_id
+                })
+                return "Message sent via WhatsApp (forced)"
+            
+            return "No response generated"
         
     except Exception as e:
-        print(f"Error processing message: {e}")
+        logger.error(f"Error processing message: {e}")
         import traceback
         traceback.print_exc()
-        return "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente."
+        
+        # If there's an error, try to send error message directly
+        try:
+            await send_ghl_message.ainvoke({
+                "contact_id": contact_id,
+                "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
+                "conversation_id": conversation_id
+            })
+        except:
+            pass
+            
+        return "Error processing message"

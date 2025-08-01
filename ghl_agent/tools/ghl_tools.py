@@ -39,7 +39,7 @@ class GHLClient:
     async def send_message(self, contact_id: str, message: str, conversation_id: Optional[str] = None) -> Dict[str, Any]:
         """Send message to contact via GHL"""
         payload = {
-            "type": "SMS",
+            "type": "WhatsApp",
             "contactId": contact_id,
             "message": message
         }

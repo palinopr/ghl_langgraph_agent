@@ -38,7 +38,7 @@ async def test_ghl_api():
     async with httpx.AsyncClient() as client:
         try:
             payload = {
-                "type": "SMS",
+                "type": "WhatsApp",
                 "contactId": "KTmWrFbAwVDVT0zMZAKb",
                 "message": "Prueba desde Python - Sistema de Baterías 🔋"
             }
