@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from ghl_agent.config import settings
 
@@ -26,13 +26,18 @@ class GHLClient:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make HTTP request to GHL API with retry logic"""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.request(
                 method=method,
                 url=f"{self.base_url}{endpoint}",
                 headers=self.headers,
                 **kwargs
             )
+            
+            # Log the response for debugging
+            if response.status_code >= 400:
+                logger.warning(f"GHL API error: {response.status_code} - {response.text[:200]}")
+            
             response.raise_for_status()
             return response.json()
     
@@ -51,11 +56,20 @@ class GHLClient:
                    contact_id=contact_id,
                    message_preview=message[:50])
         
-        return await self._make_request(
-            "POST",
-            f"/conversations/messages",
-            json=payload
-        )
+        try:
+            return await self._make_request(
+                "POST",
+                f"/conversations/messages",
+                json=payload
+            )
+        except RetryError as e:
+            # Log the actual error from the last attempt
+            logger.error(f"All retry attempts failed for contact {contact_id}")
+            if hasattr(e, 'last_attempt'):
+                last_exception = e.last_attempt.exception()
+                if last_exception:
+                    logger.error(f"Last error: {type(last_exception).__name__}: {last_exception}")
+            raise
     
     async def get_contact(self, contact_id: str) -> Dict[str, Any]:
         """Get contact information from GHL"""
