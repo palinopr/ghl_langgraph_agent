@@ -64,8 +64,9 @@ async def handle_ghl_webhook(request: Request):
     try:
         data = await request.json()
         
-        # Log the webhook receipt
-        logger.info("GHL webhook received", 
+        # Log the full webhook payload for debugging
+        logger.info("GHL webhook received - Full payload", 
+                   payload=json.dumps(data)[:500],  # First 500 chars
                    type=data.get("type"),
                    contact_id=data.get("contactId"),
                    has_message=bool(data.get("message")))
@@ -75,16 +76,33 @@ async def handle_ghl_webhook(request: Request):
         conversation_id = data.get("conversationId")
         message_body = None
         
-        # Extract message based on webhook type
+        # Extract message based on webhook type or custom format
         if data.get("type") == "InboundMessage" and data.get("message"):
             message_body = data["message"].get("body")
         elif data.get("type") == "Test":
             # Test webhook
             return {"success": True, "message": "Test webhook received"}
+        else:
+            # Check for custom webhook format from GHL automation
+            # Custom webhooks might send data in different structure
+            if "{{contact.id}}" in str(data):
+                # This is a template, not actual data
+                logger.warning("Received webhook template, not actual data")
+                return {"success": False, "error": "Webhook template received, not actual data"}
+            
+            # Try alternative field names
+            contact_id = contact_id or data.get("contact_id") or data.get("id")
+            message_body = message_body or data.get("message_body") or data.get("body") or data.get("text")
+            
+            # If message is a dict, try to extract body
+            if isinstance(data.get("message"), dict):
+                message_body = data["message"].get("body") or data["message"].get("text")
+            elif isinstance(data.get("message"), str):
+                message_body = data.get("message")
         
         # Basic validation
         if not contact_id or not message_body:
-            logger.warning(f"Missing required fields: contact_id={contact_id}, message_body={message_body}")
+            logger.warning(f"Missing required fields: contact_id={contact_id}, message_body={message_body}, data_keys={list(data.keys())}")
             return {"success": False, "error": "Missing required fields"}
         
         # Process based on environment
