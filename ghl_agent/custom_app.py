@@ -36,8 +36,8 @@ async def lifespan(app: FastAPI):
     if IS_DEPLOYMENT and client is None:
         try:
             from langgraph_sdk import get_client
-            # In deployment, connect to local API
-            client = get_client(url="http://localhost:8123")
+            # In deployment, use default client (no URL needed)
+            client = get_client()
             logger.info("LangGraph client initialized for deployment")
         except Exception as e:
             logger.error(f"Failed to initialize LangGraph client: {e}")
