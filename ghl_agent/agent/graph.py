@@ -5,6 +5,7 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 import os
+import asyncio
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -157,9 +158,14 @@ async def process_ghl_message(contact_id: str, conversation_id: Optional[str], m
                             existing_state: Optional[Dict[str, Any]] = None) -> str:
     """Process a message from GHL webhook"""
     try:
-        # For now, use a simple approach without LangGraph to avoid the tool message error
-        # Create system prompt with contact ID
-        system_prompt = f"""Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
+        # Check if we're in cloud environment
+        is_cloud = bool(os.getenv("LANGGRAPH_AUTH_TYPE"))
+        
+        if is_cloud:
+            # In cloud, use direct model invocation to avoid state issues
+            logger.info("Using cloud-optimized message processing")
+            
+            system_prompt = f"""Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
 REGLA CRÍTICA: SIEMPRE usa la función send_ghl_message para enviar tu respuesta.
@@ -176,46 +182,85 @@ FLUJO DE CONVERSACIÓN:
 
 Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
 
-        # Create messages
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=message)
-        ]
-        
-        # Get response from model with tools
-        response = await model_with_tools.ainvoke(messages)
-        
-        # Execute tool calls if any
-        if response.tool_calls:
-            for tool_call in response.tool_calls:
-                if tool_call['name'] == 'send_ghl_message':
-                    # Update args with conversation_id if provided
-                    args = tool_call['args'].copy()
-                    if conversation_id:
-                        args['conversation_id'] = conversation_id
-                    
-                    result = await send_ghl_message.ainvoke(args)
-                    logger.info(f"WhatsApp message sent: {result}")
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=message)
+            ]
             
-            return "Message processed and sent via WhatsApp"
+            # Get response with retry handling
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = await model_with_tools.ainvoke(messages)
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"Model invocation attempt {attempt + 1} failed: {e}")
+                    await asyncio.sleep(1)
+            
+            # Execute tool calls
+            if response.tool_calls:
+                for tool_call in response.tool_calls:
+                    if tool_call['name'] == 'send_ghl_message':
+                        args = tool_call['args'].copy()
+                        if conversation_id:
+                            args['conversation_id'] = conversation_id
+                        
+                        try:
+                            result = await send_ghl_message.ainvoke(args)
+                            logger.info(f"WhatsApp message sent: {result}")
+                        except Exception as tool_error:
+                            logger.error(f"Tool execution error: {tool_error}")
+                            # Return error info for debugging
+                            return f"Tool error: {str(tool_error)}"
+                
+                return "Message processed and sent via WhatsApp"
+            else:
+                # Force send if no tool calls
+                if response.content:
+                    await send_ghl_message.ainvoke({
+                        "contact_id": contact_id,
+                        "message": response.content,
+                        "conversation_id": conversation_id
+                    })
+                    return "Message sent via WhatsApp (forced)"
+                
+                return "No response generated"
+                
         else:
-            # If model didn't use tool, force send the response
-            if response.content:
-                await send_ghl_message.ainvoke({
-                    "contact_id": contact_id,
-                    "message": response.content,
-                    "conversation_id": conversation_id
-                })
-                return "Message sent via WhatsApp (forced)"
+            # Local environment - use full graph
+            logger.info("Using local graph processing")
             
-            return "No response generated"
+            state = {
+                "messages": [HumanMessage(content=message)],
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "housing_type": None,
+                "equipment_list": None,
+                "total_consumption": None,
+                "battery_recommendation": None,
+                "interested_in_consultation": None,
+                "customer_name": None,
+                "customer_phone": None,
+                "customer_email": None
+            }
+            
+            result = await graph.ainvoke(state)
+            
+            # Check if message was sent
+            for msg in result.get("messages", []):
+                if hasattr(msg, "name") and msg.name == "send_ghl_message":
+                    return "Message processed and sent via WhatsApp"
+            
+            return "Message processed"
         
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         import traceback
         traceback.print_exc()
         
-        # If there's an error, try to send error message directly
+        # Try to send error message
         try:
             await send_ghl_message.ainvoke({
                 "contact_id": contact_id,
@@ -225,4 +270,4 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
         except:
             pass
             
-        return "Error processing message"
+        return f"Error processing message: {str(e)}"
