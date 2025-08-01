@@ -19,6 +19,14 @@ from ghl_agent.tools.ghl_tools import (
     book_ghl_appointment
 )
 
+# Import MCP tools as well
+from ghl_agent.tools.ghl_mcp_tools import (
+    send_mcp_message,
+    get_mcp_contact,
+    update_mcp_contact,
+    get_mcp_calendar_events
+)
+
 import structlog
 logger = structlog.get_logger()
 
@@ -50,17 +58,34 @@ model = ChatOpenAI(
     temperature=0.7
 )
 
-# Tools
-tools = [
-    send_ghl_message,
-    get_ghl_contact_info,
-    update_ghl_contact,
-    get_available_calendar_slots,
-    book_ghl_appointment,
-    calculate_battery_runtime,
-    recommend_battery_system,
-    format_consultation_request
-]
+# Tools - Use MCP when available, fallback to direct API
+# Check if we should use MCP tools
+# Disabled for now until MCP protocol is properly implemented
+use_mcp = os.getenv("GHL_USE_MCP", "false").lower() == "true"
+
+if use_mcp:
+    # Prefer MCP tools
+    tools = [
+        send_mcp_message,  # MCP version for sending messages
+        get_mcp_contact,   # MCP version for getting contacts
+        update_mcp_contact, # MCP version for updating contacts
+        get_mcp_calendar_events,  # MCP version for calendar
+        calculate_battery_runtime,
+        recommend_battery_system,
+        format_consultation_request
+    ]
+else:
+    # Use direct API tools
+    tools = [
+        send_ghl_message,
+        get_ghl_contact_info,
+        update_ghl_contact,
+        get_available_calendar_slots,
+        book_ghl_appointment,
+        calculate_battery_runtime,
+        recommend_battery_system,
+        format_consultation_request
+    ]
 
 # Bind tools to model
 model_with_tools = model.bind_tools(tools)
@@ -165,10 +190,13 @@ async def process_ghl_message(contact_id: str, conversation_id: Optional[str], m
             # In cloud, use direct model invocation to avoid state issues
             logger.info("Using cloud-optimized message processing")
             
+            # Determine which tool to use
+            send_tool_name = "send_mcp_message" if use_mcp else "send_ghl_message"
+            
             system_prompt = f"""Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
-REGLA CRÍTICA: SIEMPRE usa la función send_ghl_message para enviar tu respuesta.
+REGLA CRÍTICA: SIEMPRE usa la función {send_tool_name} para enviar tu respuesta.
 Contact ID: {contact_id}
 
 FLUJO DE CONVERSACIÓN:
@@ -202,13 +230,17 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
             # Execute tool calls
             if response.tool_calls:
                 for tool_call in response.tool_calls:
-                    if tool_call['name'] == 'send_ghl_message':
+                    if tool_call['name'] in ['send_ghl_message', 'send_mcp_message']:
                         args = tool_call['args'].copy()
                         if conversation_id:
                             args['conversation_id'] = conversation_id
                         
                         try:
-                            result = await send_ghl_message.ainvoke(args)
+                            # Use the appropriate tool
+                            if tool_call['name'] == 'send_mcp_message':
+                                result = await send_mcp_message.ainvoke(args)
+                            else:
+                                result = await send_ghl_message.ainvoke(args)
                             logger.info(f"WhatsApp message sent: {result}")
                         except Exception as tool_error:
                             logger.error(f"Tool execution error: {tool_error}")
@@ -219,11 +251,19 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
             else:
                 # Force send if no tool calls
                 if response.content:
-                    await send_ghl_message.ainvoke({
-                        "contact_id": contact_id,
-                        "message": response.content,
-                        "conversation_id": conversation_id
-                    })
+                    # Use the appropriate tool
+                    if use_mcp:
+                        await send_mcp_message.ainvoke({
+                            "contact_id": contact_id,
+                            "message": response.content,
+                            "conversation_id": conversation_id
+                        })
+                    else:
+                        await send_ghl_message.ainvoke({
+                            "contact_id": contact_id,
+                            "message": response.content,
+                            "conversation_id": conversation_id
+                        })
                     return "Message sent via WhatsApp (forced)"
                 
                 return "No response generated"
@@ -262,11 +302,18 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
         
         # Try to send error message
         try:
-            await send_ghl_message.ainvoke({
-                "contact_id": contact_id,
-                "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
-                "conversation_id": conversation_id
-            })
+            if use_mcp:
+                await send_mcp_message.ainvoke({
+                    "contact_id": contact_id,
+                    "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
+                    "conversation_id": conversation_id
+                })
+            else:
+                await send_ghl_message.ainvoke({
+                    "contact_id": contact_id,
+                    "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
+                    "conversation_id": conversation_id
+                })
         except:
             pass
             
