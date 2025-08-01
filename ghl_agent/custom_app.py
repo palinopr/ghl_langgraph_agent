@@ -5,8 +5,6 @@ import json
 import structlog
 import os
 from typing import Dict, Any
-import httpx
-import asyncio
 
 # Configure logging
 logger = structlog.get_logger()
@@ -18,69 +16,38 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# Get the LangGraph API URL - in deployment this is available locally
-LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://localhost:8123")
+# Check if we're in deployment or local mode
+IS_DEPLOYMENT = os.getenv("LANGGRAPH_API_URL") is not None
 
-async def invoke_agent(contact_id: str, message: str, contact_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Invoke the LangGraph agent with the message"""
+# Import based on environment
+if IS_DEPLOYMENT:
     try:
-        # In LangGraph Cloud, we use the local API to create runs
-        async with httpx.AsyncClient() as client:
-            # Create a thread for this conversation
-            thread_response = await client.post(
-                f"{LANGGRAPH_API_URL}/threads",
-                json={
-                    "metadata": {
-                        "contact_id": contact_id,
-                        "contact_name": contact_info.get("name"),
-                        "contact_email": contact_info.get("email"),
-                        "contact_phone": contact_info.get("phone")
-                    }
-                }
-            )
-            thread = thread_response.json()
-            thread_id = thread["thread_id"]
-            
-            # Create a run with the message
-            run_response = await client.post(
-                f"{LANGGRAPH_API_URL}/threads/{thread_id}/runs",
-                json={
-                    "assistant_id": "ghl_agent",
-                    "input": {
-                        "messages": [{"role": "human", "content": message}],
-                        "contact_id": contact_id,
-                        "conversation_id": None,
-                        "customer_name": contact_info.get("name"),
-                        "customer_phone": contact_info.get("phone"),
-                        "customer_email": contact_info.get("email")
-                    }
-                }
-            )
-            run = run_response.json()
-            
-            # Wait for completion (with timeout)
-            for _ in range(30):  # 30 seconds timeout
-                await asyncio.sleep(1)
-                status_response = await client.get(
-                    f"{LANGGRAPH_API_URL}/threads/{thread_id}/runs/{run['run_id']}"
-                )
-                status = status_response.json()
-                if status["status"] in ["success", "error"]:
-                    return {
-                        "thread_id": thread_id,
-                        "run_id": run["run_id"],
-                        "status": status["status"]
-                    }
-            
-            return {
-                "thread_id": thread_id,
-                "run_id": run["run_id"],
-                "status": "timeout"
-            }
-            
-    except Exception as e:
-        logger.error(f"Error invoking agent: {str(e)}")
-        return {"error": str(e)}
+        from langgraph_sdk import get_client
+        client = None
+    except ImportError:
+        logger.warning("LangGraph SDK not available in deployment")
+        client = None
+else:
+    # For local testing, use the agent directly
+    from ghl_agent.agent.graph import process_ghl_message
+    client = "local"
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize based on environment"""
+    global client
+    
+    if IS_DEPLOYMENT and client is None:
+        try:
+            from langgraph_sdk import get_client
+            # In deployment, connect to local API
+            client = get_client(url="http://localhost:8123")
+            logger.info("LangGraph client initialized for deployment")
+        except Exception as e:
+            logger.error(f"Failed to initialize LangGraph client: {e}")
+            client = None
+    else:
+        logger.info("Running in local mode - using direct agent invocation")
 
 @app.post("/webhook/ghl")
 async def handle_ghl_webhook(request: Request):
@@ -97,27 +64,86 @@ async def handle_ghl_webhook(request: Request):
         if not data.get("id") or not data.get("message"):
             return {"success": False, "error": "Missing required fields"}
         
-        # Extract contact info
-        contact_info = {
-            "name": data.get("name"),
-            "email": data.get("email"),
-            "phone": data.get("phone")
-        }
+        # Process based on environment
+        if IS_DEPLOYMENT and client and client != "local":
+            # Deployment mode - use SDK
+            try:
+                thread_id = f"ghl-{data['id']}"
+                
+                # Try to get existing thread
+                try:
+                    thread = await client.threads.get(thread_id)
+                    logger.info(f"Found existing thread: {thread_id}")
+                except:
+                    # Create new thread if it doesn't exist
+                    thread = await client.threads.create(
+                        thread_id=thread_id,
+                        metadata={
+                            "contact_id": data["id"],
+                            "contact_name": data.get("name"),
+                            "contact_email": data.get("email"),
+                            "contact_phone": data.get("phone")
+                        }
+                    )
+                    logger.info(f"Created new thread: {thread_id}")
+                
+                # Create a run with the message
+                run = await client.runs.create(
+                    thread_id=thread_id,
+                    assistant_id="ghl_agent",  # This must match the name in langgraph.json
+                    input={
+                        "messages": [{"role": "human", "content": data["message"]}],
+                        "contact_id": data["id"],
+                        "conversation_id": None,
+                        "customer_name": data.get("name"),
+                        "customer_phone": data.get("phone"),
+                        "customer_email": data.get("email")
+                    }
+                )
+                
+                logger.info(f"Created run: {run['run_id']} for thread: {thread_id}")
+                
+                return JSONResponse(content={
+                    "success": True,
+                    "message": "Agent invoked successfully",
+                    "contact_id": data["id"],
+                    "thread_id": thread_id,
+                    "run_id": run["run_id"],
+                    "mode": "deployment"
+                }, status_code=200)
+                
+            except Exception as e:
+                logger.error(f"Error in deployment mode: {str(e)}")
+                return JSONResponse(content={
+                    "success": False,
+                    "error": f"Failed to invoke agent: {str(e)}"
+                }, status_code=500)
         
-        # Invoke the agent
-        result = await invoke_agent(
-            contact_id=data["id"],
-            message=data["message"],
-            contact_info=contact_info
-        )
-        
-        # Return success with agent invocation details
-        return JSONResponse(content={
-            "success": True,
-            "message": "Agent invoked",
-            "contact_id": data.get("id"),
-            "agent_result": result
-        }, status_code=200)
+        else:
+            # Local mode - use direct invocation
+            try:
+                response = await process_ghl_message(
+                    contact_id=data["id"],
+                    conversation_id=None,
+                    message=data["message"]
+                )
+                
+                logger.info(f"Agent response: {response[:100]}...")
+                
+                return JSONResponse(content={
+                    "success": True,
+                    "message": "Agent processed locally",
+                    "contact_id": data["id"],
+                    "response": response,
+                    "mode": "local"
+                }, status_code=200)
+                
+            except Exception as e:
+                logger.error(f"Error in local mode: {str(e)}")
+                return JSONResponse(content={
+                    "success": False,
+                    "error": f"Failed to process message: {str(e)}"
+                }, status_code=500)
         
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
@@ -130,7 +156,8 @@ async def health_check():
         "status": "healthy",
         "service": "battery-consultation",
         "webhooks": "ready",
-        "langgraph_api": LANGGRAPH_API_URL
+        "mode": "deployment" if IS_DEPLOYMENT else "local",
+        "client_initialized": client is not None
     }
 
 @app.get("/")
@@ -142,7 +169,8 @@ async def root():
         "endpoints": [
             "/webhook/ghl",
             "/health"
-        ]
+        ],
+        "mode": "deployment" if IS_DEPLOYMENT else "local"
     }
 
 # Export the app

@@ -1,5 +1,5 @@
 """LangGraph Cloud deployment graph"""
-from typing import TypedDict, Annotated, Sequence, Dict, Any, List, Optional, Literal
+from typing import TypedDict, Annotated, Sequence, Dict, Any, List, Optional, Literal, Union
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
@@ -28,7 +28,7 @@ from ghl_agent.tools.battery_tools import (
 class State(TypedDict):
     messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
     contact_id: str
-    conversation_id: str | None
+    conversation_id: Optional[str]
     # Battery consultation specific state
     housing_type: Optional[Literal["casa", "apartamento"]]
     equipment_list: Optional[List[str]]
