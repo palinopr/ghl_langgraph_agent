@@ -135,10 +135,21 @@ ghl_client = GHLClient()
 async def send_ghl_message(contact_id: str, message: str, conversation_id: Optional[str] = None) -> str:
     """Send a message to a customer via GoHighLevel"""
     try:
+        logger.info(f"Attempting to send WhatsApp message to contact: {contact_id}")
         result = await ghl_client.send_message(contact_id, message, conversation_id)
-        return f"Message sent successfully. Message ID: {result.get('id', 'unknown')}"
+        message_id = result.get('messageId', result.get('id', 'unknown'))
+        logger.info(f"WhatsApp message sent successfully. ID: {message_id}")
+        return f"Message sent successfully. Message ID: {message_id}"
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP Error sending WhatsApp: {e.response.status_code}", 
+                    contact_id=contact_id,
+                    error_body=e.response.text)
+        return f"Failed to send message: HTTP {e.response.status_code}"
     except Exception as e:
-        logger.error("Failed to send GHL message", error=str(e))
+        logger.error("Failed to send GHL WhatsApp message", 
+                    contact_id=contact_id,
+                    error=str(e),
+                    error_type=type(e).__name__)
         return f"Failed to send message: {str(e)}"
 
 
