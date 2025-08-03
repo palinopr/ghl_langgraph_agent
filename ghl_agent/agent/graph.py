@@ -1,8 +1,9 @@
-"""LangGraph Cloud deployment graph"""
+"""LangGraph Cloud deployment graph - Battery Consultation Agent"""
 from typing import TypedDict, Annotated, Sequence, Dict, Any, List, Optional, Literal, Union
-from langgraph.graph import StateGraph, END
+from typing_extensions import TypedDict as ExtTypedDict, Annotated as ExtAnnotated
+from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 import os
 import asyncio
@@ -19,14 +20,6 @@ from ghl_agent.tools.ghl_tools import (
     book_ghl_appointment
 )
 
-# Import MCP tools as well
-from ghl_agent.tools.ghl_mcp_tools import (
-    send_mcp_message,
-    get_mcp_contact,
-    update_mcp_contact,
-    get_mcp_calendar_events
-)
-
 import structlog
 logger = structlog.get_logger()
 
@@ -36,8 +29,23 @@ from ghl_agent.tools.battery_tools import (
     format_consultation_request
 )
 
-# State definition
-class State(TypedDict):
+# Input schema - what the API accepts
+class InputState(ExtTypedDict):
+    """Input schema for the battery consultation agent"""
+    messages: List[Dict[str, str]]  # Simple dict format for API input
+    contact_id: str
+    conversation_id: Optional[str]
+
+# Output schema - what the API returns
+class OutputState(ExtTypedDict):
+    """Output schema for the battery consultation agent"""
+    response: Optional[str]
+    tool_calls: Optional[List[Dict[str, Any]]]
+    error: Optional[str]
+    
+# Full state definition - internal state management
+class State(ExtTypedDict):
+    """Complete state for the battery consultation workflow"""
     messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
     contact_id: str
     conversation_id: Optional[str]
@@ -50,6 +58,10 @@ class State(TypedDict):
     customer_name: Optional[str]
     customer_phone: Optional[str]
     customer_email: Optional[str]
+    # Error tracking
+    error: Optional[str]
+    response: Optional[str]
+    tool_calls: Optional[List[Dict[str, Any]]]
 
 
 # Initialize the model
@@ -58,33 +70,31 @@ model = ChatOpenAI(
     temperature=0.7
 )
 
-# Tools - Use MCP when available, fallback to direct API
-# Check if we should use MCP tools
-use_mcp = os.getenv("GHL_USE_MCP", "true").lower() == "true"
+# Enhanced tools with better error handling
+async def safe_send_ghl_message(contact_id: str, message: str, conversation_id: Optional[str] = None) -> str:
+    """Send message with enhanced error handling"""
+    try:
+        result = await send_ghl_message.ainvoke({
+            "contact_id": contact_id,
+            "message": message,
+            "conversation_id": conversation_id
+        })
+        return result
+    except Exception as e:
+        logger.error(f"Tool error in send_ghl_message: {str(e)}")
+        raise Exception(f"Failed to send message: {str(e)}")
 
-if use_mcp:
-    # Prefer MCP tools
-    tools = [
-        send_mcp_message,  # MCP version for sending messages
-        get_mcp_contact,   # MCP version for getting contacts
-        update_mcp_contact, # MCP version for updating contacts
-        get_mcp_calendar_events,  # MCP version for calendar
-        calculate_battery_runtime,
-        recommend_battery_system,
-        format_consultation_request
-    ]
-else:
-    # Use direct API tools
-    tools = [
-        send_ghl_message,
-        get_ghl_contact_info,
-        update_ghl_contact,
-        get_available_calendar_slots,
-        book_ghl_appointment,
-        calculate_battery_runtime,
-        recommend_battery_system,
-        format_consultation_request
-    ]
+# Tools list with proper error handling
+tools = [
+    send_ghl_message,
+    get_ghl_contact_info,
+    update_ghl_contact,
+    get_available_calendar_slots,
+    book_ghl_appointment,
+    calculate_battery_runtime,
+    recommend_battery_system,
+    format_consultation_request
+]
 
 # Bind tools to model
 model_with_tools = model.bind_tools(tools)
@@ -93,104 +103,178 @@ model_with_tools = model.bind_tools(tools)
 SYSTEM_PROMPT = """Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
-REGLA CRÍTICA: SIEMPRE debes usar la función send_mcp_message para enviar TODAS tus respuestas al cliente. 
-No escribas respuestas directamente - SIEMPRE usa la herramienta send_mcp_message.
+REGLA CRÍTICA: SIEMPRE debes usar la función send_ghl_message para enviar TODAS tus respuestas al cliente. 
+No escribas respuestas directamente - SIEMPRE usa la herramienta send_ghl_message.
 
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento
-2. Pregunta qué equipos desean energizar por 6-8 horas
-3. Para apartamentos: Recomienda batería portátil (recarga por LUMA)
-4. Para casas: Menciona opciones con placas solares, LUMA o planta eléctrica
-5. Calcula el consumo usando estos valores estándar:
-   - Nevera: 300W
-   - TV: 70W
-   - Abanico: 60W
-   - Celulares: 15W
-   - Bombilla LED: 10W
-   - Freezer: 300W
+2. Pregunta qué equipos desean energizar durante un apagón (6-8 horas)
+3. Para apartamentos: Recomienda batería portátil (se recarga con la luz de LUMA)
+4. Para casas: Menciona opciones de recarga (placas solares, luz de LUMA, planta eléctrica)
+5. Calcula consumo con valores estándar (Nevera:300W, TV:70W, Abanico:60W, etc.)
 6. Explica la fórmula: Horas = Capacidad batería (Wh) / Consumo total (W)
-7. Da un ejemplo: Batería 5120Wh / 445W = ~11.5 horas
-8. Pregunta si desean orientación personalizada o ver el catálogo
+7. Pregunta si desean orientación personalizada o ver el catálogo
 
-IMPORTANTE:
-- SIEMPRE usa send_ghl_message para enviar mensajes al cliente
-- El contact_id está disponible en el contexto
-- Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)
-- Usa un tono amigable y profesional
-- Si quieren orientación, recolecta: nombre, teléfono y email
-- Si no quieren orientación, ofrece el enlace: tuplantapr.com
-- Siempre enfócate en resolver necesidades de energía durante apagones"""
+PRODUCTOS RECOMENDADOS:
+- Apartamentos/Bajo consumo (<1000W): EcoFlow Delta 2 (1024Wh)
+- Casas/Consumo medio (1000-2000W): EG4 LifePower 48V 100Ah (5120Wh)
+- Alto consumo (>2000W): Sistema expandible Growatt o múltiples EG4
 
+Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
 
-def agent(state: State) -> Dict[str, Any]:
-    """Main agent node"""
-    # Add system message if it's the first message
-    messages = list(state["messages"])
-    if not any(isinstance(m, SystemMessage) for m in messages):
-        # Include contact_id in the system prompt
-        system_content = SYSTEM_PROMPT + f"\n\nCONTEXTO IMPORTANTE:\n- Contact ID del cliente: {state['contact_id']}\n- Usa este contact_id cuando llames a send_ghl_message"
-        messages.insert(0, SystemMessage(content=system_content))
+# Helper function to convert dict messages to BaseMessage objects
+def convert_messages(messages: List[Union[Dict, BaseMessage]]) -> List[BaseMessage]:
+    """Convert dict messages to proper BaseMessage objects"""
+    converted = []
+    for msg in messages:
+        if isinstance(msg, BaseMessage):
+            converted.append(msg)
+        elif isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "human" or role == "user":
+                converted.append(HumanMessage(content=content))
+            elif role == "assistant" or role == "ai":
+                converted.append(AIMessage(content=content))
+            elif role == "system":
+                converted.append(SystemMessage(content=content))
+            else:
+                converted.append(HumanMessage(content=content))
+    return converted
+
+# Agent node
+def agent(state: State) -> State:
+    """Main agent logic"""
+    try:
+        messages = state["messages"]
+        
+        # Convert dict messages to BaseMessage objects if needed
+        if messages and isinstance(messages[0], dict):
+            messages = convert_messages(messages)
+        
+        # Add system message if not present
+        if not messages or (len(messages) > 0 and hasattr(messages[0], 'type') and messages[0].type != "system"):
+            messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+        
+        # Invoke model
+        response = model_with_tools.invoke(messages)
+        
+        # Track tool calls for output
+        tool_calls = []
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                tool_calls.append({
+                    "name": tc["name"],
+                    "args": tc["args"]
+                })
+        
+        # Update state
+        return {
+            "messages": [response],
+            "tool_calls": tool_calls,
+            "response": response.content if response.content else None
+        }
+    except Exception as e:
+        logger.error(f"Agent error: {str(e)}")
+        return {
+            "error": str(e),
+            "messages": [AIMessage(content="Disculpa, tuve un problema procesando tu mensaje. ¿Podrías repetirlo?")]
+        }
+
+# Error handling node
+def error_node(state: State) -> State:
+    """Handle errors gracefully"""
+    error_msg = state.get("error", "Error desconocido")
+    logger.error(f"Error node triggered: {error_msg}")
     
-    # Get response from model
-    response = model_with_tools.invoke(messages)
+    # Try to send error message to user
+    try:
+        contact_id = state.get("contact_id")
+        if contact_id:
+            # Create a simple error message
+            error_response = AIMessage(
+                content="Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente en unos momentos."
+            )
+            return {
+                "messages": [error_response],
+                "error": error_msg,
+                "response": "Error técnico - por favor intenta nuevamente"
+            }
+    except:
+        pass
     
-    # Return updated messages
-    return {"messages": [response]}
+    return state
 
-
+# Conditional edge function
 def should_continue(state: State) -> str:
-    """Determine if we should continue or end"""
-    last_message = state["messages"][-1]
+    """Determine next step in the graph"""
+    messages = state["messages"]
+    last_message = messages[-1]
     
-    # If there are tool calls, continue to tools
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+    # Check for errors
+    if state.get("error"):
+        return "error"
+    
+    # If LLM makes tool call, route to tools
+    if last_message.tool_calls:
         return "tools"
     
-    # Otherwise, we're done
+    # Otherwise end
     return "end"
 
-
-# Build the graph
-workflow = StateGraph(State)
+# Create the graph with explicit schemas
+workflow = StateGraph(
+    State, 
+    input_schema=InputState,
+    output_schema=OutputState
+)
 
 # Add nodes
 workflow.add_node("agent", agent)
 workflow.add_node("tools", ToolNode(tools))
+workflow.add_node("error", error_node)
 
 # Set entry point
-workflow.set_entry_point("agent")
+workflow.add_edge(START, "agent")
 
-# Add edges
+# Add conditional routing
 workflow.add_conditional_edges(
     "agent",
     should_continue,
     {
         "tools": "tools",
+        "error": "error",
         "end": END
     }
 )
 
-# Always go back to agent after tools
+# Route back to agent after tools
 workflow.add_edge("tools", "agent")
+
+# Error node goes to end
+workflow.add_edge("error", END)
 
 # Compile the graph
 graph = workflow.compile()
 
-
-# Helper function for webhook integration
-async def process_ghl_message(contact_id: str, conversation_id: Optional[str], message: str, 
-                            existing_state: Optional[Dict[str, Any]] = None) -> str:
-    """Process a message from GHL webhook"""
+# Cloud-optimized message processing function
+async def process_ghl_message(
+    contact_id: str,
+    conversation_id: Optional[str],
+    message: str,
+    conversation_history: List[Dict[str, str]] = None
+) -> str:
+    """Process a message from GoHighLevel webhook - optimized for cloud deployment"""
     try:
-        # Check if we're in cloud environment
-        is_cloud = bool(os.getenv("LANGGRAPH_AUTH_TYPE"))
+        # Check if running in cloud deployment
+        is_cloud = os.getenv("LANGGRAPH_AUTH_TYPE") is not None
         
         if is_cloud:
-            # In cloud, use direct model invocation to avoid state issues
+            # Cloud deployment - use direct tool invocation
             logger.info("Using cloud-optimized message processing")
             
-            # Determine which tool to use
-            send_tool_name = "send_mcp_message" if use_mcp else "send_ghl_message"
+            # Use direct GHL tool
+            send_tool_name = "send_ghl_message"
             
             system_prompt = f"""Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
@@ -229,17 +313,14 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
             # Execute tool calls
             if response.tool_calls:
                 for tool_call in response.tool_calls:
-                    if tool_call['name'] in ['send_ghl_message', 'send_mcp_message']:
+                    if tool_call['name'] == 'send_ghl_message':
                         args = tool_call['args'].copy()
                         if conversation_id:
                             args['conversation_id'] = conversation_id
                         
                         try:
-                            # Use the appropriate tool
-                            if tool_call['name'] == 'send_mcp_message':
-                                result = await send_mcp_message.ainvoke(args)
-                            else:
-                                result = await send_ghl_message.ainvoke(args)
+                            # Use direct GHL tool
+                            result = await send_ghl_message.ainvoke(args)
                             logger.info(f"WhatsApp message sent: {result}")
                         except Exception as tool_error:
                             logger.error(f"Tool execution error: {tool_error}")
@@ -250,50 +331,52 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
             else:
                 # Force send if no tool calls
                 if response.content:
-                    # Use the appropriate tool
-                    if use_mcp:
-                        await send_mcp_message.ainvoke({
-                            "contact_id": contact_id,
-                            "message": response.content,
-                            "conversation_id": conversation_id
-                        })
-                    else:
-                        await send_ghl_message.ainvoke({
-                            "contact_id": contact_id,
-                            "message": response.content,
-                            "conversation_id": conversation_id
-                        })
+                    # Use the direct GHL tool
+                    await send_ghl_message.ainvoke({
+                        "contact_id": contact_id,
+                        "message": response.content,
+                        "conversation_id": conversation_id
+                    })
                     return "Message sent via WhatsApp (forced)"
                 
                 return "No response generated"
                 
         else:
-            # Local environment - use full graph
+            # Local mode - use full graph
             logger.info("Using local graph processing")
             
+            # Convert conversation history to messages
+            messages = []
+            if conversation_history:
+                for msg in conversation_history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role == "assistant":
+                        messages.append(AIMessage(content=content))
+                    else:
+                        messages.append(HumanMessage(content=content))
+            
+            # Add current message
+            messages.append(HumanMessage(content=message))
+            
+            # Create state
             state = {
-                "messages": [HumanMessage(content=message)],
+                "messages": messages,
                 "contact_id": contact_id,
-                "conversation_id": conversation_id,
-                "housing_type": None,
-                "equipment_list": None,
-                "total_consumption": None,
-                "battery_recommendation": None,
-                "interested_in_consultation": None,
-                "customer_name": None,
-                "customer_phone": None,
-                "customer_email": None
+                "conversation_id": conversation_id
             }
             
+            # Invoke graph
             result = await graph.ainvoke(state)
             
-            # Check if message was sent
-            for msg in result.get("messages", []):
-                if hasattr(msg, "name") and msg.name == "send_ghl_message":
-                    return "Message processed and sent via WhatsApp"
-            
-            return "Message processed"
-        
+            # Extract response
+            if result.get("error"):
+                return f"Error: {result['error']}"
+            elif result.get("response"):
+                return result["response"]
+            else:
+                return "Message processed"
+                
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         import traceback
@@ -301,19 +384,32 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
         
         # Try to send error message
         try:
-            if use_mcp:
-                await send_mcp_message.ainvoke({
-                    "contact_id": contact_id,
-                    "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
-                    "conversation_id": conversation_id
-                })
-            else:
-                await send_ghl_message.ainvoke({
-                    "contact_id": contact_id,
-                    "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
-                    "conversation_id": conversation_id
-                })
+            await send_ghl_message.ainvoke({
+                "contact_id": contact_id,
+                "message": "Disculpa, estoy teniendo problemas técnicos. Por favor intenta nuevamente.",
+                "conversation_id": conversation_id
+            })
         except:
             pass
             
         return f"Error processing message: {str(e)}"
+
+
+# Optional: Add checkpointer for production
+def get_checkpointer():
+    """Get checkpointer for production use"""
+    postgres_uri = os.getenv("POSTGRES_URI")
+    if postgres_uri:
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+            return PostgresSaver.from_conn_string(postgres_uri)
+        except ImportError:
+            logger.warning("PostgresSaver not available, using memory checkpointer")
+    
+    # Default to memory checkpointer for development
+    from langgraph.checkpoint.memory import MemorySaver
+    return MemorySaver()
+
+
+# Export for cloud deployment
+__all__ = ["graph", "process_ghl_message", "State"]

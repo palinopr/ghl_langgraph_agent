@@ -2,7 +2,10 @@
   "python_version": "3.11",
   "dependencies": ["./"],
   "graphs": {
-    "ghl_agent": "./ghl_agent/agent/graph.py:graph"
+    "ghl_agent": {
+      "path": "./ghl_agent/agent/graph.py:graph",
+      "description": "Battery consultation agent for GoHighLevel integration - helps customers find the right battery system for their needs in Puerto Rico"
+    }
   },
   "env": ".env",
   "http": {

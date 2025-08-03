@@ -1,0 +1,4 @@
+DEPLOYMENT_URL=https://ghl-customer-agent-6938642b2e79555cbe304569cd0f8a05.us.langgraph.app
+ASSISTANT_ID=ghl_agent
+LANGSMITH_API_KEY=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
+Tested at: 2025-08-02 18:10:18.076797
