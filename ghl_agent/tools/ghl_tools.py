@@ -277,11 +277,23 @@ async def book_ghl_appointment(
         return f"Failed to book appointment: {str(e)}"
 
 
+@tool
+async def get_conversation_messages(conversation_id: str) -> List[Dict[str, Any]]:
+    """Get conversation history from GoHighLevel"""
+    try:
+        messages = await ghl_client.get_conversation_messages(conversation_id)
+        return messages
+    except Exception as e:
+        logger.error("Failed to get conversation messages", error=str(e))
+        return []
+
+
 # Export all tools
 GHL_TOOLS = [
     send_ghl_message,
     get_ghl_contact_info,
     update_ghl_contact,
     get_available_calendar_slots,
-    book_ghl_appointment
+    book_ghl_appointment,
+    get_conversation_messages
 ]

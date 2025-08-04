@@ -24,7 +24,8 @@ from ghl_agent.tools.ghl_tools import (
     get_ghl_contact_info,
     update_ghl_contact,
     get_available_calendar_slots,
-    book_ghl_appointment
+    book_ghl_appointment,
+    get_conversation_messages
 )
 
 import structlog
@@ -178,6 +179,7 @@ tools = [
     update_ghl_contact,
     get_available_calendar_slots,
     book_ghl_appointment,
+    get_conversation_messages,
     calculate_battery_runtime,
     recommend_battery_system,
     format_consultation_request
@@ -201,6 +203,9 @@ Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal 
 
 REGLA CRÍTICA: SIEMPRE debes usar la función send_ghl_message para enviar TODAS tus respuestas al cliente. 
 No escribas respuestas directamente - SIEMPRE usa la herramienta send_ghl_message.
+
+CONTEXTO DE CONVERSACIÓN:
+Si recibes un conversation_id, SIEMPRE debes primero usar get_conversation_messages para obtener el historial de conversación completo antes de responder. Esto te ayudará a entender el contexto y continuar la conversación apropiadamente.
 
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento
@@ -291,6 +296,12 @@ async def agent(state: State) -> State:
         
         # Build enhanced system prompt with memory context
         system_content = SYSTEM_PROMPT
+        
+        # Add conversation_id to context if available
+        conversation_id = state.get("conversation_id")
+        if conversation_id:
+            system_content += f"\n\nConversation ID: {conversation_id}\nRecuerda: DEBES usar get_conversation_messages con este ID para obtener el historial completo antes de responder."
+        
         if conversation_memory:
             memory_context = f"\n\nCONTEXTO DE CONVERSACIÓN PREVIA:\n"
             if conversation_memory.customer_name:
