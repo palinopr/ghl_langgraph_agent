@@ -226,9 +226,49 @@ El cliente está interesado en recibir orientación personalizada sobre sistemas
     return message.strip()
 
 
+@tool
+def update_conversation_state(
+    housing_type: Optional[str] = None,
+    equipment_list: Optional[List[str]] = None,
+    customer_name: Optional[str] = None,
+    customer_phone: Optional[str] = None,
+    interested_in_consultation: Optional[bool] = None
+) -> str:
+    """
+    Update conversation state with extracted information.
+    
+    Args:
+        housing_type: "casa" or "apartamento" if mentioned
+        equipment_list: List of equipment mentioned (e.g., ["nevera", "abanicos", "luces"])
+        customer_name: Customer's name if provided
+        customer_phone: Customer's phone if provided
+        interested_in_consultation: True if customer wants consultation
+        
+    Returns:
+        Confirmation of what was updated
+    """
+    updates = []
+    
+    if housing_type:
+        updates.append(f"housing_type: {housing_type}")
+    if equipment_list:
+        updates.append(f"equipment: {', '.join(equipment_list)}")
+    if customer_name:
+        updates.append(f"name: {customer_name}")
+    if customer_phone:
+        updates.append(f"phone: {customer_phone}")
+    if interested_in_consultation is not None:
+        updates.append(f"consultation: {'yes' if interested_in_consultation else 'no'}")
+    
+    if updates:
+        return f"State updated: {'; '.join(updates)}"
+    return "No updates provided"
+
+
 # Export all tools
 BATTERY_TOOLS = [
     calculate_battery_runtime,
     recommend_battery_system,
-    format_consultation_request
+    format_consultation_request,
+    update_conversation_state
 ]

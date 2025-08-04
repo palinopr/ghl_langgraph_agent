@@ -34,7 +34,8 @@ logger = structlog.get_logger()
 from ghl_agent.tools.battery_tools import (
     calculate_battery_runtime,
     recommend_battery_system,
-    format_consultation_request
+    format_consultation_request,
+    update_conversation_state
 )
 
 from ghl_agent.config_loader import get_config, get_config_value
@@ -182,7 +183,8 @@ tools = [
     get_conversation_messages,
     calculate_battery_runtime,
     recommend_battery_system,
-    format_consultation_request
+    format_consultation_request,
+    update_conversation_state
 ]
 
 # Bind tools to model with parallel execution support
@@ -223,6 +225,13 @@ No escribas respuestas directamente - SIEMPRE usa la herramienta send_ghl_messag
 
 CONTEXTO DE CONVERSACIÓN:
 Si recibes un conversation_id, SIEMPRE debes primero usar get_conversation_messages para obtener el historial de conversación completo antes de responder. Esto te ayudará a entender el contexto y continuar la conversación apropiadamente.
+
+EXTRACCIÓN DE INFORMACIÓN:
+IMPORTANTE: Cuando el cliente proporcione información clave, DEBES usar update_conversation_state para guardarla:
+- Si menciona "casa" o "apartamento" → update_conversation_state(housing_type="casa" o "apartamento")
+- Si menciona equipos específicos → update_conversation_state(equipment_list=["nevera", "abanicos", etc.])
+- Si proporciona su nombre → update_conversation_state(customer_name="nombre")
+- Si está interesado en consulta → update_conversation_state(interested_in_consultation=true)
 
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento
@@ -399,8 +408,8 @@ async def agent(state: State) -> State:
             )
             save_conversation_memory(store, contact_id, new_memory)
         
-        # Update state
-        return {
+        # Update state - preserve any existing state values
+        updated_state = {
             "messages": [response],
             "tool_calls": tool_calls,
             "response": response.content if response.content else None,
@@ -408,6 +417,18 @@ async def agent(state: State) -> State:
             "retry_count": 0,  # Reset on success
             "store": store  # Pass store reference
         }
+        
+        # Preserve existing state values if not being updated
+        if not updated_state.get("housing_type") and state.get("housing_type"):
+            updated_state["housing_type"] = state["housing_type"]
+        if not updated_state.get("equipment_list") and state.get("equipment_list"):
+            updated_state["equipment_list"] = state["equipment_list"]
+        if not updated_state.get("customer_name") and state.get("customer_name"):
+            updated_state["customer_name"] = state["customer_name"]
+        if not updated_state.get("customer_phone") and state.get("customer_phone"):
+            updated_state["customer_phone"] = state["customer_phone"]
+            
+        return updated_state
     except NodeInterrupt:
         raise  # Re-raise interrupts for human review
     except Exception as e:
@@ -576,7 +597,27 @@ async def custom_tool_node(state: State) -> State:
                 )
             )
     
-    return {"messages": tool_messages}
+    # Check if any state updates were made
+    state_updates = {}
+    for i, tool_message in enumerate(tool_messages):
+        if isinstance(tool_message.content, str) and "State updated:" in tool_message.content:
+            # Extract state updates from the corresponding tool call
+            tool_call = last_message.tool_calls[i]
+            if tool_call["name"] == "update_conversation_state":
+                args = tool_call["args"]
+                if args.get("housing_type"):
+                    state_updates["housing_type"] = args["housing_type"]
+                if args.get("equipment_list"):
+                    state_updates["equipment_list"] = args["equipment_list"]
+                if args.get("customer_name"):
+                    state_updates["customer_name"] = args["customer_name"]
+                if args.get("customer_phone"):
+                    state_updates["customer_phone"] = args["customer_phone"]
+                if args.get("interested_in_consultation") is not None:
+                    state_updates["interested_in_consultation"] = args["interested_in_consultation"]
+    
+    # Return messages and any state updates
+    return {"messages": tool_messages, **state_updates}
 
 # Add nodes
 workflow.add_node("agent", agent)
