@@ -1,8 +1,11 @@
 """LangGraph Cloud deployment graph - Battery Consultation Agent"""
 from typing import TypedDict, Annotated, Sequence, Dict, Any, List, Optional, Literal, Union
 from typing_extensions import TypedDict as ExtTypedDict, Annotated as ExtAnnotated
+from operator import add
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END, START
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.errors import NodeInterrupt
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 import os
@@ -29,6 +32,15 @@ from ghl_agent.tools.battery_tools import (
     format_consultation_request
 )
 
+# Configuration schema for deployment
+class AgentConfig(BaseModel):
+    """Configuration for the battery consultation agent"""
+    min_budget: int = Field(default=5000, description="Minimum budget requirement in USD")
+    calendar_days_ahead: int = Field(default=7, description="Days to look ahead for appointments")
+    response_language: str = Field(default="es", description="Language for responses (es/en)")
+    max_retry_attempts: int = Field(default=3, description="Max retries for failed operations")
+    enable_human_review: bool = Field(default=False, description="Enable human review for appointments")
+
 # Input schema - what the API accepts
 class InputState(ExtTypedDict):
     """Input schema for the battery consultation agent"""
@@ -46,7 +58,7 @@ class OutputState(ExtTypedDict):
 # Full state definition - internal state management
 class State(ExtTypedDict):
     """Complete state for the battery consultation workflow"""
-    messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
+    messages: Annotated[Sequence[BaseMessage], add]  # Auto-merge messages
     contact_id: str
     conversation_id: Optional[str]
     # Battery consultation specific state
@@ -58,10 +70,15 @@ class State(ExtTypedDict):
     customer_name: Optional[str]
     customer_phone: Optional[str]
     customer_email: Optional[str]
+    # Conversation tracking
+    conversation_stage: Optional[Literal["greeting", "discovery", "qualification", "scheduling", "completed"]]
+    retry_count: int
     # Error tracking
     error: Optional[str]
     response: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
+    # Configuration
+    config: Optional[AgentConfig]
 
 
 # Initialize the model
@@ -142,9 +159,34 @@ def convert_messages(messages: List[Union[Dict, BaseMessage]]) -> List[BaseMessa
                 converted.append(HumanMessage(content=content))
     return converted
 
+# Conditional execution helpers
+def should_book_appointment(state: State) -> bool:
+    """Check if we have enough info to book an appointment"""
+    return bool(
+        state.get("interested_in_consultation") and 
+        state.get("customer_phone") and
+        state.get("total_consumption") is not None
+    )
+
+def should_calculate_consumption(state: State) -> bool:
+    """Check if we have equipment list to calculate consumption"""
+    return bool(state.get("equipment_list") and len(state["equipment_list"]) > 0)
+
+def get_conversation_stage(state: State) -> str:
+    """Determine current conversation stage based on state"""
+    if not state.get("housing_type"):
+        return "discovery"
+    elif not state.get("total_consumption"):
+        return "qualification"
+    elif state.get("interested_in_consultation") and not state.get("customer_phone"):
+        return "scheduling"
+    elif state.get("customer_phone"):
+        return "completed"
+    return "greeting"
+
 # Agent node
 async def agent(state: State) -> State:
-    """Main agent logic"""
+    """Main agent logic with enhanced error handling"""
     try:
         messages = state["messages"]
         
@@ -156,8 +198,32 @@ async def agent(state: State) -> State:
         if not messages or (len(messages) > 0 and hasattr(messages[0], 'type') and messages[0].type != "system"):
             messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
         
-        # Invoke model
-        response = await model_with_tools.ainvoke(messages)
+        # Update conversation stage
+        current_stage = get_conversation_stage(state)
+        
+        # Check for human review requirement
+        config = state.get("config", AgentConfig())
+        if config.enable_human_review and should_book_appointment(state):
+            raise NodeInterrupt(
+                f"Human review required before booking appointment. "
+                f"Customer: {state.get('customer_name', 'Unknown')}, "
+                f"Phone: {state.get('customer_phone', 'Unknown')}"
+            )
+        
+        # Invoke model with retry logic
+        retry_count = state.get("retry_count", 0)
+        max_retries = config.max_retry_attempts
+        
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = await model_with_tools.ainvoke(messages)
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"Model invocation attempt {attempt + 1} failed: {e}")
+                await asyncio.sleep(1)
         
         # Track tool calls for output
         tool_calls = []
@@ -172,13 +238,19 @@ async def agent(state: State) -> State:
         return {
             "messages": [response],
             "tool_calls": tool_calls,
-            "response": response.content if response.content else None
+            "response": response.content if response.content else None,
+            "conversation_stage": current_stage,
+            "retry_count": 0  # Reset on success
         }
+    except NodeInterrupt:
+        raise  # Re-raise interrupts for human review
     except Exception as e:
         logger.error(f"Agent error: {str(e)}")
+        retry_count = state.get("retry_count", 0)
         return {
             "error": str(e),
-            "messages": [AIMessage(content="Disculpa, tuve un problema procesando tu mensaje. ¿Podrías repetirlo?")]
+            "messages": [AIMessage(content="Disculpa, tuve un problema procesando tu mensaje. ¿Podrías repetirlo?")],
+            "retry_count": retry_count + 1
         }
 
 # Error handling node
@@ -205,19 +277,27 @@ def error_node(state: State) -> State:
     
     return state
 
-# Conditional edge function
+# Conditional edge function with enhanced routing
 def should_continue(state: State) -> str:
     """Determine next step in the graph"""
     messages = state["messages"]
     last_message = messages[-1]
     
-    # Check for errors
+    # Check for errors first
     if state.get("error"):
-        return "error"
+        # Check retry count
+        config = state.get("config", AgentConfig())
+        if state.get("retry_count", 0) >= config.max_retry_attempts:
+            return "error"
+        return "agent"  # Retry
     
-    # If LLM makes tool call, route to tools
-    if last_message.tool_calls:
+    # Use standard tools_condition for tool routing
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
+    
+    # Check if conversation is complete
+    if state.get("conversation_stage") == "completed":
+        return "end"
     
     # Otherwise end
     return "end"
@@ -229,36 +309,9 @@ workflow = StateGraph(
     output_schema=OutputState
 )
 
-# Custom tool node that formats output properly
-async def tool_node(state: State) -> State:
-    """Execute tools and format output"""
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    if last_message.tool_calls:
-        tool_node_instance = ToolNode(tools)
-        # Use ainvoke for async execution
-        result = await tool_node_instance.ainvoke(state)
-        
-        # Extract tool response for output
-        tool_response = None
-        if "messages" in result and len(result["messages"]) > 0:
-            for msg in result["messages"]:
-                if hasattr(msg, "content"):
-                    tool_response = msg.content
-                    break
-        
-        # Update state with tool results
-        return {
-            "messages": result.get("messages", []),
-            "response": tool_response or "Tool executed successfully"
-        }
-    
-    return state
-
 # Add nodes
 workflow.add_node("agent", agent)
-workflow.add_node("tools", tool_node)
+workflow.add_node("tools", ToolNode(tools))  # Use standard ToolNode
 workflow.add_node("error", error_node)
 
 # Set entry point
@@ -275,14 +328,40 @@ workflow.add_conditional_edges(
     }
 )
 
-# Route tools directly to end (no loop back to agent)
-workflow.add_edge("tools", END)
+# Route tools back to agent for continued conversation
+workflow.add_edge("tools", "agent")
 
 # Error node goes to end
 workflow.add_edge("error", END)
 
 # Compile the graph
 graph = workflow.compile()
+
+# Streaming helper for better UX
+async def stream_graph_updates(state: State, config: AgentConfig = None):
+    """Stream updates during graph execution"""
+    if not config:
+        config = state.get("config", AgentConfig())
+    
+    # Stream status updates
+    yield {"status": "processing", "stage": state.get("conversation_stage", "unknown")}
+    
+    # If calculating consumption
+    if should_calculate_consumption(state):
+        yield {"status": "calculating", "message": "Calculando consumo eléctrico..."}
+    
+    # If booking appointment
+    if should_book_appointment(state):
+        yield {"status": "booking", "message": "Verificando disponibilidad de calendario..."}
+    
+    # If we have tool calls
+    if state.get("tool_calls"):
+        for tool_call in state["tool_calls"]:
+            yield {
+                "status": "tool_execution",
+                "tool": tool_call["name"],
+                "message": f"Ejecutando: {tool_call['name']}"
+            }
 
 # Cloud-optimized message processing function
 async def process_ghl_message(
@@ -439,4 +518,14 @@ def get_checkpointer():
 
 
 # Export for cloud deployment
-__all__ = ["graph", "process_ghl_message", "State"]
+__all__ = [
+    "graph", 
+    "process_ghl_message", 
+    "State",
+    "AgentConfig",
+    "stream_graph_updates",
+    "get_checkpointer",
+    "should_book_appointment",
+    "should_calculate_consumption",
+    "get_conversation_stage"
+]
