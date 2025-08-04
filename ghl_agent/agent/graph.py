@@ -6,10 +6,14 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.errors import NodeInterrupt
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 import os
 import asyncio
+import uuid
+from datetime import datetime
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -32,14 +36,21 @@ from ghl_agent.tools.battery_tools import (
     format_consultation_request
 )
 
+from ghl_agent.config_loader import get_config, get_config_value
+
+# Load configuration
+config = get_config()
+
 # Configuration schema for deployment
 class AgentConfig(BaseModel):
     """Configuration for the battery consultation agent"""
-    min_budget: int = Field(default=5000, description="Minimum budget requirement in USD")
-    calendar_days_ahead: int = Field(default=7, description="Days to look ahead for appointments")
-    response_language: str = Field(default="es", description="Language for responses (es/en)")
-    max_retry_attempts: int = Field(default=3, description="Max retries for failed operations")
-    enable_human_review: bool = Field(default=False, description="Enable human review for appointments")
+    min_budget: int = Field(default_factory=lambda: config.qualification.min_budget, description="Minimum budget requirement in USD")
+    calendar_days_ahead: int = Field(default_factory=lambda: config.calendar.days_ahead, description="Days to look ahead for appointments")
+    response_language: str = Field(default_factory=lambda: config.business.language, description="Language for responses (es/en)")
+    max_retry_attempts: int = Field(default_factory=lambda: config.behavior.max_retry_attempts, description="Max retries for failed operations")
+    enable_human_review: bool = Field(default_factory=lambda: config.behavior.enable_human_review, description="Enable human review for appointments")
+    enable_memory: bool = Field(default_factory=lambda: config.memory.enable_persistence, description="Enable conversation memory persistence")
+    parallel_tool_calls: bool = Field(default_factory=lambda: config.behavior.parallel_tool_calls, description="Enable parallel tool execution")
 
 # Input schema - what the API accepts
 class InputState(ExtTypedDict):
@@ -55,6 +66,26 @@ class OutputState(ExtTypedDict):
     tool_calls: Optional[List[Dict[str, Any]]]
     error: Optional[str]
     
+# Memory schemas
+class ConversationMemory(BaseModel):
+    """Schema for storing conversation context"""
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    customer_email: Optional[str] = None
+    housing_type: Optional[Literal["casa", "apartamento"]] = None
+    equipment_list: List[str] = Field(default_factory=list)
+    total_consumption: Optional[float] = None
+    budget_confirmed: Optional[bool] = None
+    appointment_scheduled: Optional[bool] = None
+    last_interaction: datetime = Field(default_factory=datetime.now)
+
+class CustomerPreferences(BaseModel):
+    """Schema for storing customer preferences"""
+    preferred_contact_method: Optional[Literal["sms", "whatsapp", "call"]] = None
+    preferred_time_slots: List[str] = Field(default_factory=list)
+    language_preference: str = "es"
+    notes: List[str] = Field(default_factory=list)
+
 # Full state definition - internal state management
 class State(ExtTypedDict):
     """Complete state for the battery consultation workflow"""
@@ -79,6 +110,8 @@ class State(ExtTypedDict):
     tool_calls: Optional[List[Dict[str, Any]]]
     # Configuration
     config: Optional[AgentConfig]
+    # Memory store reference
+    store: Optional[BaseStore]
 
 
 # Initialize the model
@@ -86,6 +119,43 @@ model = ChatOpenAI(
     model="gpt-4-turbo-preview",
     temperature=0.7
 )
+
+# Memory management functions
+def get_memory_store(state: State) -> BaseStore:
+    """Get or create memory store for the conversation"""
+    if state.get("store"):
+        return state["store"]
+    return InMemoryStore()
+
+def load_conversation_memory(store: BaseStore, contact_id: str) -> Optional[ConversationMemory]:
+    """Load conversation memory from store"""
+    try:
+        namespace = ("conversation", contact_id)
+        memories = store.search(namespace)
+        if memories:
+            return ConversationMemory(**memories[0].value)
+    except Exception as e:
+        logger.warning(f"Failed to load conversation memory: {e}")
+    return None
+
+def save_conversation_memory(store: BaseStore, contact_id: str, memory: ConversationMemory):
+    """Save conversation memory to store"""
+    try:
+        namespace = ("conversation", contact_id)
+        store.put(namespace, str(uuid.uuid4()), memory.model_dump(mode="json"))
+    except Exception as e:
+        logger.error(f"Failed to save conversation memory: {e}")
+
+def load_customer_preferences(store: BaseStore, contact_id: str) -> Optional[CustomerPreferences]:
+    """Load customer preferences from store"""
+    try:
+        namespace = ("preferences", contact_id)
+        memories = store.search(namespace)
+        if memories:
+            return CustomerPreferences(**memories[0].value)
+    except Exception as e:
+        logger.warning(f"Failed to load customer preferences: {e}")
+    return None
 
 # Enhanced tools with better error handling
 async def safe_send_ghl_message(contact_id: str, message: str, conversation_id: Optional[str] = None) -> str:
@@ -113,11 +183,20 @@ tools = [
     format_consultation_request
 ]
 
-# Bind tools to model
-model_with_tools = model.bind_tools(tools)
+# Bind tools to model with parallel execution support
+model_with_tools = model.bind_tools(tools, parallel_tool_calls=True)
 
-# System prompt
-SYSTEM_PROMPT = """Eres un agente de servicio al cliente especializado en sistemas de baterías y energía solar para Puerto Rico.
+# Build system prompt from config
+def build_system_prompt():
+    """Build system prompt from configuration"""
+    equipment_list = ", ".join([f"{k.capitalize()}:{v}W" for k, v in list(config.equipment_consumption.items())[:5]])
+    
+    products_text = []
+    for category, products in config.products.items():
+        for product in products:
+            products_text.append(f"- {product['best_for']}: {product['name']} ({product['capacity_wh']}Wh)")
+    
+    return f"""Eres un agente de servicio al cliente de {config.business.name}.
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
 REGLA CRÍTICA: SIEMPRE debes usar la función send_ghl_message para enviar TODAS tus respuestas al cliente. 
@@ -128,16 +207,20 @@ FLUJO DE CONVERSACIÓN:
 2. Pregunta qué equipos desean energizar durante un apagón (6-8 horas)
 3. Para apartamentos: Recomienda batería portátil (se recarga con la luz de LUMA)
 4. Para casas: Menciona opciones de recarga (placas solares, luz de LUMA, planta eléctrica)
-5. Calcula consumo con valores estándar (Nevera:300W, TV:70W, Abanico:60W, etc.)
+5. Calcula consumo con valores estándar ({equipment_list}, etc.)
 6. Explica la fórmula: Horas = Capacidad batería (Wh) / Consumo total (W)
 7. Pregunta si desean orientación personalizada o ver el catálogo
 
 PRODUCTOS RECOMENDADOS:
-- Apartamentos/Bajo consumo (<1000W): EcoFlow Delta 2 (1024Wh)
-- Casas/Consumo medio (1000-2000W): EG4 LifePower 48V 100Ah (5120Wh)
-- Alto consumo (>2000W): Sistema expandible Growatt o múltiples EG4
+{chr(10).join(products_text)}
 
-Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
+Presupuesto mínimo: ${config.qualification.min_budget}
+
+Mantén respuestas cortas y conversacionales (2-3 oraciones máximo).
+Responde en {config.business.language}."""
+
+# System prompt
+SYSTEM_PROMPT = build_system_prompt()
 
 # Helper function to convert dict messages to BaseMessage objects
 def convert_messages(messages: List[Union[Dict, BaseMessage]]) -> List[BaseMessage]:
@@ -184,31 +267,61 @@ def get_conversation_stage(state: State) -> str:
         return "completed"
     return "greeting"
 
-# Agent node
+# Agent node with memory support
 async def agent(state: State) -> State:
-    """Main agent logic with enhanced error handling"""
+    """Main agent logic with enhanced error handling and memory support"""
     try:
         messages = state["messages"]
+        contact_id = state["contact_id"]
+        config = state.get("config", AgentConfig())
+        
+        # Get memory store
+        store = get_memory_store(state)
+        
+        # Load conversation memory if enabled
+        conversation_memory = None
+        customer_preferences = None
+        if config.enable_memory:
+            conversation_memory = load_conversation_memory(store, contact_id)
+            customer_preferences = load_customer_preferences(store, contact_id)
         
         # Convert dict messages to BaseMessage objects if needed
         if messages and isinstance(messages[0], dict):
             messages = convert_messages(messages)
         
+        # Build enhanced system prompt with memory context
+        system_content = SYSTEM_PROMPT
+        if conversation_memory:
+            memory_context = f"\n\nCONTEXTO DE CONVERSACIÓN PREVIA:\n"
+            if conversation_memory.customer_name:
+                memory_context += f"- Nombre del cliente: {conversation_memory.customer_name}\n"
+            if conversation_memory.housing_type:
+                memory_context += f"- Tipo de vivienda: {conversation_memory.housing_type}\n"
+            if conversation_memory.equipment_list:
+                memory_context += f"- Equipos mencionados: {', '.join(conversation_memory.equipment_list)}\n"
+            if conversation_memory.total_consumption:
+                memory_context += f"- Consumo calculado: {conversation_memory.total_consumption}W\n"
+            if conversation_memory.budget_confirmed:
+                memory_context += f"- Presupuesto confirmado: {'Sí' if conversation_memory.budget_confirmed else 'No'}\n"
+            system_content += memory_context
+        
         # Add system message if not present
         if not messages or (len(messages) > 0 and hasattr(messages[0], 'type') and messages[0].type != "system"):
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+            messages = [SystemMessage(content=system_content)] + messages
         
         # Update conversation stage
         current_stage = get_conversation_stage(state)
         
         # Check for human review requirement
-        config = state.get("config", AgentConfig())
         if config.enable_human_review and should_book_appointment(state):
             raise NodeInterrupt(
                 f"Human review required before booking appointment. "
                 f"Customer: {state.get('customer_name', 'Unknown')}, "
                 f"Phone: {state.get('customer_phone', 'Unknown')}"
             )
+        
+        # Configure model for parallel tool calls if enabled
+        active_model = model_with_tools if config.parallel_tool_calls else model.bind_tools(tools, parallel_tool_calls=False)
         
         # Invoke model with retry logic
         retry_count = state.get("retry_count", 0)
@@ -217,7 +330,7 @@ async def agent(state: State) -> State:
         response = None
         for attempt in range(max_retries):
             try:
-                response = await model_with_tools.ainvoke(messages)
+                response = await active_model.ainvoke(messages)
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
@@ -234,13 +347,33 @@ async def agent(state: State) -> State:
                     "args": tc["args"]
                 })
         
+        # Save updated memory if enabled
+        if config.enable_memory and any([
+            state.get("customer_name"),
+            state.get("housing_type"),
+            state.get("equipment_list"),
+            state.get("total_consumption")
+        ]):
+            new_memory = ConversationMemory(
+                customer_name=state.get("customer_name") or (conversation_memory.customer_name if conversation_memory else None),
+                customer_phone=state.get("customer_phone") or (conversation_memory.customer_phone if conversation_memory else None),
+                customer_email=state.get("customer_email") or (conversation_memory.customer_email if conversation_memory else None),
+                housing_type=state.get("housing_type") or (conversation_memory.housing_type if conversation_memory else None),
+                equipment_list=state.get("equipment_list") or (conversation_memory.equipment_list if conversation_memory else []),
+                total_consumption=state.get("total_consumption") or (conversation_memory.total_consumption if conversation_memory else None),
+                budget_confirmed=state.get("interested_in_consultation"),
+                appointment_scheduled=current_stage == "completed"
+            )
+            save_conversation_memory(store, contact_id, new_memory)
+        
         # Update state
         return {
             "messages": [response],
             "tool_calls": tool_calls,
             "response": response.content if response.content else None,
             "conversation_stage": current_stage,
-            "retry_count": 0  # Reset on success
+            "retry_count": 0,  # Reset on success
+            "store": store  # Pass store reference
         }
     except NodeInterrupt:
         raise  # Re-raise interrupts for human review
@@ -302,6 +435,38 @@ def should_continue(state: State) -> str:
     # Otherwise end
     return "end"
 
+# Parallel enrichment nodes (example of parallel execution pattern)
+async def enrich_contact_info(state: State) -> State:
+    """Enrich contact information from GHL (runs in parallel with battery calculation)"""
+    try:
+        contact_id = state["contact_id"]
+        if contact_id and not state.get("customer_name"):
+            # This could run in parallel with other operations
+            contact_info = await get_ghl_contact_info.ainvoke({"contact_id": contact_id})
+            return {
+                "customer_name": contact_info.get("name"),
+                "customer_email": contact_info.get("email"),
+                "customer_phone": contact_info.get("phone")
+            }
+    except Exception as e:
+        logger.warning(f"Failed to enrich contact info: {e}")
+    return {}
+
+async def calculate_consumption_parallel(state: State) -> State:
+    """Calculate consumption in parallel (example of parallel node)"""
+    try:
+        if state.get("equipment_list") and not state.get("total_consumption"):
+            # This runs in parallel with contact enrichment
+            result = await calculate_battery_runtime.ainvoke({
+                "equipment_list": state["equipment_list"],
+                "battery_capacity_wh": 1024  # Default for estimation
+            })
+            # Extract consumption from result
+            return {"total_consumption": result.get("total_consumption", 0)}
+    except Exception as e:
+        logger.warning(f"Failed to calculate consumption: {e}")
+    return {}
+
 # Create the graph with explicit schemas
 workflow = StateGraph(
     State, 
@@ -313,6 +478,10 @@ workflow = StateGraph(
 workflow.add_node("agent", agent)
 workflow.add_node("tools", ToolNode(tools))  # Use standard ToolNode
 workflow.add_node("error", error_node)
+
+# Optional: Add parallel enrichment nodes (commented out by default)
+# workflow.add_node("enrich_contact", enrich_contact_info)
+# workflow.add_node("calculate_consumption", calculate_consumption_parallel)
 
 # Set entry point
 workflow.add_edge(START, "agent")
@@ -333,6 +502,13 @@ workflow.add_edge("tools", "agent")
 
 # Error node goes to end
 workflow.add_edge("error", END)
+
+# Optional: Example of parallel execution pattern
+# To enable parallel enrichment, uncomment these lines:
+# workflow.add_edge(START, "enrich_contact")  # Runs in parallel with agent
+# workflow.add_edge(START, "calculate_consumption")  # Runs in parallel with agent
+# workflow.add_edge("enrich_contact", "agent")  # Merge results
+# workflow.add_edge("calculate_consumption", "agent")  # Merge results
 
 # Compile the graph
 graph = workflow.compile()
@@ -501,20 +677,48 @@ Mantén respuestas cortas y conversacionales (2-3 oraciones máximo)."""
         return f"Error processing message: {str(e)}"
 
 
-# Optional: Add checkpointer for production
-def get_checkpointer():
-    """Get checkpointer for production use"""
+# Enhanced checkpointer for production with store support
+def get_checkpointer_with_store():
+    """Get checkpointer and store for production use"""
     postgres_uri = os.getenv("POSTGRES_URI")
+    
+    # Try PostgreSQL first
     if postgres_uri:
         try:
             from langgraph.checkpoint.postgres import PostgresSaver
-            return PostgresSaver.from_conn_string(postgres_uri)
+            from langgraph.store.postgres import PostgresStore
+            checkpointer = PostgresSaver.from_conn_string(postgres_uri)
+            store = PostgresStore.from_conn_string(postgres_uri)
+            return checkpointer, store
         except ImportError:
-            logger.warning("PostgresSaver not available, using memory checkpointer")
+            logger.warning("PostgreSQL packages not available, using memory-based solutions")
     
-    # Default to memory checkpointer for development
+    # Try Redis if configured
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            from langgraph.checkpoint.redis import RedisSaver
+            from langgraph.store.redis import RedisStore
+            checkpointer = RedisSaver.from_conn_string(redis_url)
+            store = RedisStore.from_conn_string(redis_url)
+            return checkpointer, store
+        except ImportError:
+            logger.warning("Redis packages not available, using memory-based solutions")
+    
+    # Default to memory-based solutions for development
     from langgraph.checkpoint.memory import MemorySaver
-    return MemorySaver()
+    return MemorySaver(), InMemoryStore()
+
+# Compile graph with optional checkpointer
+def compile_graph_with_config(enable_checkpointing: bool = False):
+    """Compile graph with optional checkpointing and store"""
+    if enable_checkpointing:
+        checkpointer, store = get_checkpointer_with_store()
+        compiled = workflow.compile(checkpointer=checkpointer)
+        # Attach store to compiled graph for runtime access
+        compiled.store = store
+        return compiled
+    return workflow.compile()
 
 
 # Export for cloud deployment
@@ -524,8 +728,15 @@ __all__ = [
     "State",
     "AgentConfig",
     "stream_graph_updates",
-    "get_checkpointer",
+    "get_checkpointer_with_store",
+    "compile_graph_with_config",
     "should_book_appointment",
     "should_calculate_consumption",
-    "get_conversation_stage"
+    "get_conversation_stage",
+    "ConversationMemory",
+    "CustomerPreferences",
+    "load_conversation_memory",
+    "save_conversation_memory",
+    "enrich_contact_info",
+    "calculate_consumption_parallel"
 ]

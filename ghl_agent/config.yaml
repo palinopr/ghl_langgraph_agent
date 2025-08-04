@@ -1,0 +1,144 @@
+# GHL Battery Consultation Agent Configuration
+
+# Business Information
+business:
+  name: "Solar Battery Solutions PR"
+  email: "info@solarbatterypr.com"
+  phone: "+1-787-555-0123"
+  timezone: "America/Puerto_Rico"
+  language: "es"  # Default language (es/en)
+
+# Lead Qualification Settings
+qualification:
+  min_budget: 5000  # Minimum budget in USD
+  max_response_time: 300  # Max seconds to wait for response
+  business_hours:
+    start: "09:00"
+    end: "18:00"
+    days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+# Battery Products
+products:
+  portable:
+    - name: "EcoFlow Delta 2"
+      capacity_wh: 1024
+      price: 999
+      best_for: "Apartamentos y consumo bajo"
+  
+  home:
+    - name: "EG4 LifePower 48V 100Ah"
+      capacity_wh: 5120
+      price: 1499
+      best_for: "Casas con consumo medio"
+    
+    - name: "Growatt Sistema Expandible"
+      capacity_wh: 10240
+      price: 3999
+      best_for: "Alto consumo o sistemas comerciales"
+
+# Equipment Power Consumption (Watts)
+equipment_consumption:
+  # Kitchen
+  nevera: 300
+  nevera_pequeña: 150
+  microondas: 1000
+  cafetera: 800
+  
+  # Living/Bedroom
+  televisor: 70
+  abanico: 60
+  computadora: 150
+  router_internet: 30
+  
+  # Lighting
+  bombilla_led: 10
+  bombilla_regular: 60
+  
+  # Climate
+  aire_acondicionado_pequeño: 600
+  aire_acondicionado_inverter: 400
+
+# Conversation Templates
+templates:
+  greeting: |
+    ¡Hola! 👋 Soy tu especialista en sistemas de baterías para Puerto Rico. 
+    Estoy aquí para ayudarte a encontrar la solución perfecta para tu hogar.
+    
+    ¿Vives en casa o apartamento?
+
+  qualification_question: |
+    Perfecto. Para recomendarte el sistema ideal, necesito saber:
+    ¿Qué equipos te gustaría mantener funcionando durante un apagón? 
+    (Por ejemplo: nevera, abanicos, televisor, etc.)
+
+  budget_question: |
+    Basado en tus necesidades, tengo varias opciones. 
+    ¿Cuál es tu presupuesto aproximado para el sistema de baterías?
+
+  appointment_offer: |
+    ¡Excelente! Puedo agendar una consulta gratuita para explicarte todos los detalles.
+    ¿Te gustaría que uno de nuestros especialistas te visite?
+
+# Triage Rules
+triage:
+  # Auto-respond to these types of messages
+  auto_respond:
+    - "información"
+    - "precio"
+    - "batería"
+    - "solar"
+    - "apagón"
+    - "LUMA"
+  
+  # Notify human for these
+  notify_human:
+    - "urgente"
+    - "emergencia"
+    - "queja"
+    - "problema"
+    - "cancelar"
+  
+  # Ignore these
+  ignore:
+    - "spam"
+    - "publicidad"
+    - "oferta"
+
+# Calendar Settings
+calendar:
+  appointment_duration: 60  # minutes
+  buffer_time: 15  # minutes between appointments
+  days_ahead: 7  # days to look ahead for availability
+  
+  # Preferred time slots
+  preferred_slots:
+    morning: "09:00-12:00"
+    afternoon: "14:00-17:00"
+
+# Integration Settings
+integrations:
+  ghl:
+    location_id: "${GHL_LOCATION_ID}"
+    calendar_id: "${GHL_CALENDAR_ID}"
+    
+  webhooks:
+    meta_verify_token: "${META_VERIFY_TOKEN}"
+    
+# Memory Settings
+memory:
+  enable_persistence: true
+  store_type: "postgres"  # postgres, redis, or memory
+  retention_days: 90
+
+# Agent Behavior
+behavior:
+  enable_human_review: false
+  parallel_tool_calls: true
+  max_retry_attempts: 3
+  response_delay: 2  # seconds to wait before responding (more human-like)
+  
+# Logging
+logging:
+  level: "INFO"
+  enable_langsmith: true
+  trace_all_conversations: true
