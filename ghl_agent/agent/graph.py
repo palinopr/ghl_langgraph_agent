@@ -186,6 +186,23 @@ tools = [
 ]
 
 # Bind tools to model with parallel execution support
+# Add tool examples to help the model understand proper usage
+tool_examples = [
+    {
+        "name": "send_ghl_message",
+        "description": "Send a WhatsApp message to a GHL contact. Always use the actual contact_id provided, never use 'contact_id' as a literal string.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contact_id": {"type": "string", "description": "The actual GHL contact ID (e.g., 'mVCISvZhpHehaDavn1ij')"},
+                "message": {"type": "string", "description": "The message to send"},
+                "conversation_id": {"type": "string", "description": "Optional conversation ID"}
+            },
+            "required": ["contact_id", "message"]
+        }
+    }
+]
+
 model_with_tools = model.bind_tools(tools, parallel_tool_calls=True)
 
 # Build system prompt from config
@@ -296,6 +313,11 @@ async def agent(state: State) -> State:
         
         # Build enhanced system prompt with memory context
         system_content = SYSTEM_PROMPT
+        
+        # Add contact_id and conversation_id to context
+        if contact_id:
+            system_content += f"\n\nIMPORTANTE - Contact ID actual: {contact_id}"
+            system_content += f"\nCuando uses send_ghl_message, DEBES usar contact_id: '{contact_id}' (no uses 'contact_id' como texto literal)"
         
         # Add conversation_id to context if available
         conversation_id = state.get("conversation_id")
@@ -504,13 +526,23 @@ async def custom_tool_node(state: State) -> State:
         tool_name = tool_call["name"]
         tool_args = tool_call["args"].copy()
         
-        # Ensure contact_id is properly set for tools that need it
-        if tool_name == "send_ghl_message" and "contact_id" in tool_args:
-            tool_args["contact_id"] = contact_id
+        # Fix contact_id for any tool that needs it
+        if "contact_id" in tool_args:
+            # Replace any placeholder values with the actual contact_id
+            if tool_args["contact_id"] in ["contact_id", "unknown", "test-contact-id", ""]:
+                tool_args["contact_id"] = contact_id
+            # If it's already a proper ID (not a placeholder), keep it
+            elif not tool_args["contact_id"].startswith("test-") and len(tool_args["contact_id"]) > 10:
+                # Keep the existing contact_id if it looks valid
+                pass
+            else:
+                # Otherwise use the one from state
+                tool_args["contact_id"] = contact_id
         
-        # Add conversation_id if needed
-        if tool_name == "send_ghl_message" and conversation_id:
-            tool_args["conversation_id"] = conversation_id
+        # Add conversation_id if the tool supports it
+        if tool_name in ["send_ghl_message", "get_conversation_messages"] and conversation_id:
+            if "conversation_id" not in tool_args or not tool_args.get("conversation_id"):
+                tool_args["conversation_id"] = conversation_id
             
         # Execute the tool
         try:
@@ -634,7 +666,8 @@ async def process_ghl_message(
 Tu objetivo es ayudar a los clientes a encontrar la solución de batería ideal para sus necesidades.
 
 REGLA CRÍTICA: SIEMPRE usa la función {send_tool_name} para enviar tu respuesta.
-Contact ID: {contact_id}
+IMPORTANTE: Cuando uses send_ghl_message, el parámetro contact_id DEBE ser exactamente: '{contact_id}'
+No uses la palabra 'contact_id' como valor, usa el ID real: '{contact_id}'
 
 FLUJO DE CONVERSACIÓN:
 1. Saluda cordialmente y pregunta si viven en casa o apartamento
