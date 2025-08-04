@@ -143,7 +143,7 @@ def convert_messages(messages: List[Union[Dict, BaseMessage]]) -> List[BaseMessa
     return converted
 
 # Agent node
-def agent(state: State) -> State:
+async def agent(state: State) -> State:
     """Main agent logic"""
     try:
         messages = state["messages"]
@@ -157,7 +157,7 @@ def agent(state: State) -> State:
             messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
         
         # Invoke model
-        response = model_with_tools.invoke(messages)
+        response = await model_with_tools.ainvoke(messages)
         
         # Track tool calls for output
         tool_calls = []
@@ -230,14 +230,15 @@ workflow = StateGraph(
 )
 
 # Custom tool node that formats output properly
-def tool_node(state: State) -> State:
+async def tool_node(state: State) -> State:
     """Execute tools and format output"""
     messages = state["messages"]
     last_message = messages[-1]
     
     if last_message.tool_calls:
         tool_node_instance = ToolNode(tools)
-        result = tool_node_instance.invoke(state)
+        # Use ainvoke for async execution
+        result = await tool_node_instance.ainvoke(state)
         
         # Extract tool response for output
         tool_response = None
