@@ -485,9 +485,70 @@ workflow = StateGraph(
     output_schema=OutputState
 )
 
+# Custom tool node that ensures contact_id is passed
+async def custom_tool_node(state: State) -> State:
+    """Custom tool node that ensures contact_id is passed correctly"""
+    messages = state["messages"]
+    contact_id = state.get("contact_id", "unknown")
+    conversation_id = state.get("conversation_id")
+    
+    # Get the last message which should contain tool calls
+    last_message = messages[-1]
+    
+    if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        return state
+    
+    # Execute tools with proper contact_id
+    tool_messages = []
+    for tool_call in last_message.tool_calls:
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"].copy()
+        
+        # Ensure contact_id is properly set for tools that need it
+        if tool_name == "send_ghl_message" and "contact_id" in tool_args:
+            tool_args["contact_id"] = contact_id
+        
+        # Add conversation_id if needed
+        if tool_name == "send_ghl_message" and conversation_id:
+            tool_args["conversation_id"] = conversation_id
+            
+        # Execute the tool
+        try:
+            # Find the tool function
+            tool_func = None
+            for tool in tools:
+                if tool.name == tool_name:
+                    tool_func = tool
+                    break
+            
+            if tool_func:
+                result = await tool_func.ainvoke(tool_args)
+                tool_messages.append(
+                    ToolMessage(
+                        content=str(result),
+                        tool_call_id=tool_call["id"]
+                    )
+                )
+            else:
+                tool_messages.append(
+                    ToolMessage(
+                        content=f"Tool {tool_name} not found",
+                        tool_call_id=tool_call["id"]
+                    )
+                )
+        except Exception as e:
+            tool_messages.append(
+                ToolMessage(
+                    content=f"Error executing {tool_name}: {str(e)}",
+                    tool_call_id=tool_call["id"]
+                )
+            )
+    
+    return {"messages": tool_messages}
+
 # Add nodes
 workflow.add_node("agent", agent)
-workflow.add_node("tools", ToolNode(tools))  # Use standard ToolNode
+workflow.add_node("tools", custom_tool_node)  # Use custom tool node
 workflow.add_node("error", error_node)
 
 # Optional: Add parallel enrichment nodes (commented out by default)
