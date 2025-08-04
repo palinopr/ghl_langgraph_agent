@@ -229,9 +229,35 @@ workflow = StateGraph(
     output_schema=OutputState
 )
 
+# Custom tool node that formats output properly
+def tool_node(state: State) -> State:
+    """Execute tools and format output"""
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    if last_message.tool_calls:
+        tool_node_instance = ToolNode(tools)
+        result = tool_node_instance.invoke(state)
+        
+        # Extract tool response for output
+        tool_response = None
+        if "messages" in result and len(result["messages"]) > 0:
+            for msg in result["messages"]:
+                if hasattr(msg, "content"):
+                    tool_response = msg.content
+                    break
+        
+        # Update state with tool results
+        return {
+            "messages": result.get("messages", []),
+            "response": tool_response or "Tool executed successfully"
+        }
+    
+    return state
+
 # Add nodes
 workflow.add_node("agent", agent)
-workflow.add_node("tools", ToolNode(tools))
+workflow.add_node("tools", tool_node)
 workflow.add_node("error", error_node)
 
 # Set entry point
@@ -248,8 +274,8 @@ workflow.add_conditional_edges(
     }
 )
 
-# Route back to agent after tools
-workflow.add_edge("tools", "agent")
+# Route tools directly to end (no loop back to agent)
+workflow.add_edge("tools", END)
 
 # Error node goes to end
 workflow.add_edge("error", END)
