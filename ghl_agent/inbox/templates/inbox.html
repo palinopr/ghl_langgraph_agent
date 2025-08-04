@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Inbox - GHL Battery Consultation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+        
+        .header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 500;
+        }
+        
+        .container {
+            display: flex;
+            height: calc(100vh - 60px);
+        }
+        
+        .sidebar {
+            width: 300px;
+            background-color: white;
+            border-right: 1px solid #e0e0e0;
+            overflow-y: auto;
+        }
+        
+        .main-content {
+            flex: 1;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+        
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .metric-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .metric-label {
+            color: #666;
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+        }
+        
+        .conversation-item {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .conversation-item:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .conversation-item.active {
+            background-color: #e3f2fd;
+            border-left: 3px solid #2196f3;
+        }
+        
+        .customer-name {
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+        }
+        
+        .conversation-meta {
+            font-size: 0.875rem;
+            color: #666;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-left: 0.5rem;
+        }
+        
+        .status-new { background: #e8f5e9; color: #2e7d32; }
+        .status-in-progress { background: #fff3cd; color: #856404; }
+        .status-qualified { background: #e3f2fd; color: #1565c0; }
+        .status-completed { background: #f3e5f5; color: #6a1b9a; }
+        
+        .sentiment-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 0.5rem;
+        }
+        
+        .sentiment-positive { background: #4caf50; }
+        .sentiment-neutral { background: #ff9800; }
+        .sentiment-negative { background: #f44336; }
+        
+        .conversation-detail {
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .detail-section {
+            margin-bottom: 2rem;
+        }
+        
+        .detail-section h3 {
+            font-size: 1.125rem;
+            margin-bottom: 1rem;
+            color: #2c3e50;
+        }
+        
+        .progress-bar {
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 1rem 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #2196f3;
+            transition: width 0.3s ease;
+        }
+        
+        .search-box {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .search-input {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 0.875rem;
+        }
+        
+        .filter-tabs {
+            display: flex;
+            padding: 0 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .filter-tab {
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        
+        .filter-tab:hover {
+            background: #f5f5f5;
+        }
+        
+        .filter-tab.active {
+            border-bottom-color: #2196f3;
+            color: #2196f3;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 2rem;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #2196f3;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔋 Agent Inbox - Battery Consultation Assistant</h1>
+    </div>
+    
+    <div class="container">
+        <div class="sidebar">
+            <div class="search-box">
+                <input type="text" class="search-input" placeholder="Buscar conversaciones..." id="searchInput">
+            </div>
+            
+            <div class="filter-tabs">
+                <div class="filter-tab active" data-filter="all">Todas</div>
+                <div class="filter-tab" data-filter="new">Nuevas</div>
+                <div class="filter-tab" data-filter="qualified">Calificadas</div>
+                <div class="filter-tab" data-filter="completed">Completadas</div>
+            </div>
+            
+            <div id="conversationList" class="conversation-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="metrics" id="metrics">
+                <div class="metric-card">
+                    <div class="metric-value">-</div>
+                    <div class="metric-label">Conversaciones Totales</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">-</div>
+                    <div class="metric-label">Citas Agendadas</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">-</div>
+                    <div class="metric-label">Leads Calificados</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">-%</div>
+                    <div class="metric-label">Tasa de Conversión</div>
+                </div>
+            </div>
+            
+            <div id="conversationDetail" class="conversation-detail">
+                <div class="empty-state">
+                    <p>Selecciona una conversación para ver los detalles</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '/inbox';
+        let currentFilter = 'all';
+        let conversations = [];
+        let selectedConversation = null;
+        
+        // Load initial data
+        async function loadData() {
+            await loadMetrics();
+            await loadConversations();
+        }
+        
+        // Load metrics
+        async function loadMetrics() {
+            try {
+                const response = await fetch(`${API_BASE}/metrics`);
+                const metrics = await response.json();
+                
+                document.querySelector('.metrics').innerHTML = `
+                    <div class="metric-card">
+                        <div class="metric-value">${metrics.total_conversations || 0}</div>
+                        <div class="metric-label">Conversaciones Totales</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">${metrics.completed_appointments || 0}</div>
+                        <div class="metric-label">Citas Agendadas</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">${metrics.qualified_leads || 0}</div>
+                        <div class="metric-label">Leads Calificados</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">${metrics.conversion_rate?.toFixed(1) || 0}%</div>
+                        <div class="metric-label">Tasa de Conversión</div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Failed to load metrics:', error);
+            }
+        }
+        
+        // Load conversations
+        async function loadConversations(filter = 'all') {
+            try {
+                const url = filter === 'all' 
+                    ? `${API_BASE}/conversations` 
+                    : `${API_BASE}/conversations?status=${filter}`;
+                    
+                const response = await fetch(url);
+                conversations = await response.json();
+                
+                renderConversations(conversations);
+            } catch (error) {
+                console.error('Failed to load conversations:', error);
+                document.getElementById('conversationList').innerHTML = 
+                    '<div class="empty-state">Error loading conversations</div>';
+            }
+        }
+        
+        // Render conversations
+        function renderConversations(convs) {
+            const listEl = document.getElementById('conversationList');
+            
+            if (convs.length === 0) {
+                listEl.innerHTML = '<div class="empty-state">No hay conversaciones</div>';
+                return;
+            }
+            
+            listEl.innerHTML = convs.map(conv => `
+                <div class="conversation-item" data-id="${conv.contact_id}">
+                    <div class="customer-name">
+                        <span class="sentiment-indicator sentiment-${conv.sentiment}"></span>
+                        ${conv.customer_name || 'Cliente sin nombre'}
+                        <span class="status-badge status-${getStatusClass(conv)}">${getStatusLabel(conv)}</span>
+                    </div>
+                    <div class="conversation-meta">
+                        ${conv.housing_type || 'Tipo no especificado'} • 
+                        ${conv.equipment_list?.length || 0} equipos
+                    </div>
+                    <div class="conversation-meta">
+                        ${conv.next_action || 'Sin acción sugerida'}
+                    </div>
+                </div>
+            `).join('');
+            
+            // Add click handlers
+            document.querySelectorAll('.conversation-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const id = item.dataset.id;
+                    selectConversation(id);
+                });
+            });
+        }
+        
+        // Get status class
+        function getStatusClass(conv) {
+            if (conv.appointment_scheduled) return 'completed';
+            if (conv.stage === 'scheduling') return 'qualified';
+            if (conv.stage === 'discovery' || conv.stage === 'qualification') return 'in-progress';
+            return 'new';
+        }
+        
+        // Get status label
+        function getStatusLabel(conv) {
+            if (conv.appointment_scheduled) return 'Completada';
+            if (conv.stage === 'scheduling') return 'Calificada';
+            if (conv.stage === 'discovery' || conv.stage === 'qualification') return 'En Progreso';
+            return 'Nueva';
+        }
+        
+        // Select conversation
+        async function selectConversation(contactId) {
+            // Update UI
+            document.querySelectorAll('.conversation-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            document.querySelector(`[data-id="${contactId}"]`)?.classList.add('active');
+            
+            // Load details
+            try {
+                const response = await fetch(`${API_BASE}/conversations/${contactId}`);
+                const details = await response.json();
+                
+                renderConversationDetail(details);
+            } catch (error) {
+                console.error('Failed to load conversation details:', error);
+            }
+        }
+        
+        // Render conversation detail
+        function renderConversationDetail(details) {
+            const detailEl = document.getElementById('conversationDetail');
+            const conv = details.conversation;
+            const summary = details.summary;
+            
+            detailEl.innerHTML = `
+                <div class="detail-section">
+                    <h3>Información del Cliente</h3>
+                    <p><strong>Nombre:</strong> ${conv.customer_name || 'No especificado'}</p>
+                    <p><strong>Teléfono:</strong> ${conv.customer_phone || 'No especificado'}</p>
+                    <p><strong>Email:</strong> ${conv.customer_email || 'No especificado'}</p>
+                    <p><strong>Tipo de Vivienda:</strong> ${conv.housing_type || 'No especificado'}</p>
+                </div>
+                
+                <div class="detail-section">
+                    <h3>Progreso de la Conversación</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${summary.progress}%"></div>
+                    </div>
+                    <p>${summary.progress}% completado</p>
+                </div>
+                
+                <div class="detail-section">
+                    <h3>Equipos Mencionados</h3>
+                    <p>${conv.equipment_list?.join(', ') || 'Ninguno'}</p>
+                    ${conv.total_consumption ? `<p><strong>Consumo Total:</strong> ${conv.total_consumption}W</p>` : ''}
+                </div>
+                
+                ${summary.pain_points?.length > 0 ? `
+                <div class="detail-section">
+                    <h3>Puntos de Dolor</h3>
+                    <ul>
+                        ${summary.pain_points.map(p => `<li>${p}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                ${summary.opportunities?.length > 0 ? `
+                <div class="detail-section">
+                    <h3>Oportunidades</h3>
+                    <ul>
+                        ${summary.opportunities.map(o => `<li>${o}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                ${summary.recommended_actions?.length > 0 ? `
+                <div class="detail-section">
+                    <h3>Acciones Recomendadas</h3>
+                    <ul>
+                        ${summary.recommended_actions.map(a => `<li>${a}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+            `;
+        }
+        
+        // Search functionality
+        document.getElementById('searchInput').addEventListener('input', async (e) => {
+            const query = e.target.value;
+            
+            if (query.length < 2) {
+                renderConversations(conversations);
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/search?query=${encodeURIComponent(query)}`);
+                const results = await response.json();
+                renderConversations(results);
+            } catch (error) {
+                console.error('Search failed:', error);
+            }
+        });
+        
+        // Filter tabs
+        document.querySelectorAll('.filter-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                // Update active tab
+                document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                
+                // Load filtered conversations
+                const filter = tab.dataset.filter;
+                currentFilter = filter;
+                loadConversations(filter);
+            });
+        });
+        
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            loadMetrics();
+            if (currentFilter) {
+                loadConversations(currentFilter);
+            }
+        }, 30000);
+        
+        // Initial load
+        loadData();
+    </script>
+</body>
+</html>

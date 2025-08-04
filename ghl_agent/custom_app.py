@@ -1,11 +1,12 @@
 """Custom webhook app for LangGraph deployment"""
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from contextlib import asynccontextmanager
 import json
 import structlog
 import os
 from typing import Dict, Any
+from pathlib import Path
 
 # Configure logging
 logger = structlog.get_logger()
@@ -205,10 +206,34 @@ async def root():
         "version": "2.0.0",
         "endpoints": [
             "/webhook/ghl",
-            "/health"
+            "/health",
+            "/inbox",
+            "/inbox/conversations",
+            "/inbox/metrics"
         ],
         "mode": "deployment" if IS_DEPLOYMENT else "local"
     }
+
+# Add inbox functionality
+try:
+    from ghl_agent.inbox.api import create_inbox_router
+    inbox_router = create_inbox_router()
+    app.include_router(inbox_router)
+    
+    # Serve inbox HTML UI
+    @app.get("/inbox", response_class=HTMLResponse)
+    async def serve_inbox():
+        """Serve the inbox UI"""
+        try:
+            from ghl_agent.inbox.simple_ui import get_simple_html
+            return HTMLResponse(content=get_simple_html())
+        except Exception as e:
+            logger.error(f"Failed to load inbox UI: {e}")
+            return HTMLResponse("<h1>Inbox UI Error</h1>", status_code=500)
+    
+    logger.info("Inbox functionality added to app")
+except Exception as e:
+    logger.warning(f"Failed to add inbox functionality: {e}")
 
 # Export the app
 __all__ = ["app"]

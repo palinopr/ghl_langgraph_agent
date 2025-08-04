@@ -39,6 +39,7 @@ from ghl_agent.tools.battery_tools import (
 )
 
 from ghl_agent.config_loader import get_config, get_config_value
+from ghl_agent.agent.reflection import reflect_on_conversation
 
 # Load configuration
 config = get_config()
@@ -407,6 +408,21 @@ async def agent(state: State) -> State:
                 appointment_scheduled=current_stage == "completed"
             )
             save_conversation_memory(store, contact_id, new_memory)
+            
+        # Run reflection analysis periodically (every 5 messages or at key stages)
+        if len(messages) % 5 == 0 or current_stage in ["qualification", "completed"]:
+            try:
+                insights = await reflect_on_conversation(messages, contact_id)
+                if insights:
+                    logger.info("Reflection insights", 
+                              contact_id=contact_id,
+                              sentiment=insights.get("sentiment"),
+                              next_action=insights.get("next_action"))
+                    # Store insights in memory
+                    namespace = ("insights", contact_id)
+                    store.put(namespace, str(uuid.uuid4()), insights)
+            except Exception as e:
+                logger.warning(f"Reflection analysis failed: {e}")
         
         # Update state - preserve any existing state values
         updated_state = {
